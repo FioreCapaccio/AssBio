@@ -1606,7 +1606,7 @@
           <input type="text" id="c_codice" placeholder="es. CLI-001">
         </div>
         <div class="form-group full" style="margin-top:4px;">
-          <label>Strumenti installati (modello + n° serie)</label>
+          <label>Strumenti installati (modello + n° serie + fornitore)</label>
           <div id="strumentiInstallatiRows" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;"></div>
           <button type="button" class="btn btn-ghost btn-sm" style="margin-top:8px;align-self:flex-start;" onclick="addStrumentoRow()">+ Aggiungi strumento</button>
         </div>
@@ -1872,7 +1872,7 @@
       <div class="form-grid">
         <div class="form-group">
           <label for="i_fornitore_id">Fornitore / contratto tariffe</label>
-          <select id="i_fornitore_id" onchange="calcolaImportoIntervento()">
+          <select id="i_fornitore_id" onchange="calcolaImportoIntervento(); aggiornaNumeroInterventoPerFornitore()">
             <option value="">-- Nessun fornitore --</option>
           </select>
         </div>
@@ -3069,7 +3069,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.7.7';
+const APP_VERSION = '2.7.9';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -6240,11 +6240,16 @@ function addStrumentoRow(data = {}) {
   const cont = document.getElementById('strumentiInstallatiRows');
   const div = document.createElement('div');
   div.className = 'strumento-row';
-  div.style.cssText = 'display:grid;grid-template-columns:1fr 1fr 110px auto;gap:6px;align-items:center;';
+  div.style.cssText = 'display:grid;grid-template-columns:1.3fr 1fr 1fr 100px auto;gap:6px;align-items:center;';
+  const fornitoreId = data.fornitoreId || '';
   div.innerHTML = `
     <input type="text" placeholder="Modello (es. Cobas 6000)" value="${escRaw(data.modello)}" style="font-size:0.88rem;">
     <input type="text" placeholder="N° serie / Matricola" value="${escRaw(data.seriale)}" style="font-size:0.88rem;font-family:monospace;">
-    <select style="font-size:0.88rem;">
+    <select class="strumento-fornitore" style="font-size:0.88rem;">
+      <option value="">-- Nessun fornitore --</option>
+      ${_fornitoriConTariffa().map(f => `<option value="${f.id}" ${String(fornitoreId)===String(f.id)?'selected':''}>${escHtml(f.ragione)}</option>`).join('')}
+    </select>
+    <select class="strumento-mercato" style="font-size:0.88rem;">
       <option value="Standard" ${data.mercato==='Standard'?'selected':''}>Standard</option>
       <option value="Clinical" ${data.mercato==='Clinical'?'selected':''}>Clinical</option>
     </select>
@@ -6255,8 +6260,14 @@ function addStrumentoRow(data = {}) {
 function getStrumentiFromRows() {
   return [...document.querySelectorAll('#strumentiInstallatiRows .strumento-row')].map(div => {
     const inputs = div.querySelectorAll('input');
-    const sel = div.querySelector('select');
-    return { modello: inputs[0].value.trim(), seriale: inputs[1].value.trim(), mercato: sel ? sel.value : 'Standard' };
+    const selFornitore = div.querySelector('.strumento-fornitore');
+    const selMercato = div.querySelector('.strumento-mercato');
+    return {
+      modello: inputs[0].value.trim(),
+      seriale: inputs[1].value.trim(),
+      fornitoreId: selFornitore && selFornitore.value ? parseInt(selFornitore.value) : null,
+      mercato: selMercato ? selMercato.value : 'Standard',
+    };
   }).filter(s => s.modello || s.seriale);
 }
 
@@ -6445,6 +6456,14 @@ function renderClienti() {
 let editInterventoId = null;
 let currentPdfInterventoId = null;
 
+// Fornitori selezionabili come "Fornitore / contratto tariffe" su un intervento: solo quelli
+// con almeno una tariffa configurata (altrimenti non ci sarebbe nulla da valorizzare). Stessa
+// lista usata sia nel form intervento sia nel selettore fornitore per singolo strumento nella
+// scheda cliente, così un fornitore associato a uno strumento è sempre selezionabile qui.
+function _fornitoriConTariffa() {
+  return DB.fornitori.filter(f => f.tariffaLavoro || f.tariffaViaggio || f.tariffaKm || f.importoFisso);
+}
+
 function openInterventoModal(id = null) {
   editInterventoId = id;
   const i = id ? DB.interventi.find(x => x.id === id) : null;
@@ -6464,8 +6483,7 @@ function openInterventoModal(id = null) {
   // Popola select fornitori
   const selFor = document.getElementById('i_fornitore_id');
   selFor.innerHTML = '<option value="">-- Nessun fornitore --</option>' +
-    DB.fornitori.filter(f => f.tariffaLavoro||f.tariffaViaggio||f.tariffaKm||f.importoFisso)
-      .map(f => `<option value="${f.id}">${escHtml(f.ragione)}</option>`).join('');
+    _fornitoriConTariffa().map(f => `<option value="${f.id}">${escHtml(f.ragione)}</option>`).join('');
 
   // Popola select opzioni (stato, tipo, esito) con eventuale selezione corrente
   popolaSelectOpzioni(i ? { stato: i.stato, tipo: i.tipo, esito: i.esito, tecnico: i.tecnico } : {});
@@ -6544,6 +6562,42 @@ function openInterventoModal(id = null) {
   openModal('modalIntervento');
 }
 
+// Il fornitore INTELSINT usa una numerazione interventi separata dal progressivo standard
+// WO-XXXX: "NN-AA" (NN = progressivo che riparte da 1 a ogni nuovo anno solare, AA = ultime
+// due cifre dell'anno corrente). Il numero resta comunque un campo libero modificabile
+// dall'utente: questa funzione si limita a proporre il valore corretto quando si sceglie/
+// deseleziona Intelsint come fornitore in un NUOVO intervento (non tocca mai un intervento
+// già esistente in modifica).
+function _isFornitoreIntelsint(fornitoreId) {
+  if (!fornitoreId) return false;
+  const f = DB.fornitori.find(x => x.id === fornitoreId);
+  return !!f && String(f.ragione || '').trim().toUpperCase() === 'INTELSINT';
+}
+
+function _prossimoNumeroIntelsint() {
+  const annoCorrente = String(new Date().getFullYear()).slice(-2);
+  const re = /^(\d+)-(\d{2})$/;
+  let maxNum = 0;
+  DB.interventi.forEach(iv => {
+    const m = typeof iv.numero === 'string' ? iv.numero.match(re) : null;
+    if (!m || m[2] !== annoCorrente) return;
+    if (!_isFornitoreIntelsint(iv.fornitoreId)) return;
+    const n = parseInt(m[1], 10);
+    if (n > maxNum) maxNum = n;
+  });
+  return String(maxNum + 1).padStart(2, '0') + '-' + annoCorrente;
+}
+
+function aggiornaNumeroInterventoPerFornitore() {
+  if (editInterventoId) return; // solo per nuovi interventi
+  const numEl = document.getElementById('i_numero');
+  if (!numEl) return;
+  const fid = parseInt(document.getElementById('i_fornitore_id')?.value) || 0;
+  numEl.value = _isFornitoreIntelsint(fid)
+    ? _prossimoNumeroIntelsint()
+    : 'WO-' + String(DB._nextId.intervento).padStart(4, '0');
+}
+
 // BUG FIX (consolidamento formula importo): questa formula era duplicata in 5 punti diversi
 // del codice (anteprima nel form, salvataggio, tabella interventi, allineamento fornitori,
 // import Excel). Una di queste copie (l'anteprima "stimata" nella tabella Interventi)
@@ -6612,7 +6666,7 @@ function _tuttiStrumenti() {
   DB.clienti.forEach(c => {
     const strumenti = c.strumentiInstallati || migraStrumenti(c.strumenti||'');
     strumenti.forEach(s => {
-      if (s.modello || s.seriale) res.push({ clienteId: c.id, ragione: c.ragione, modello: s.modello||'', seriale: s.seriale||'' });
+      if (s.modello || s.seriale) res.push({ clienteId: c.id, ragione: c.ragione, modello: s.modello||'', seriale: s.seriale||'', fornitoreId: s.fornitoreId||null });
     });
   });
   return res;
@@ -6622,7 +6676,7 @@ function _renderSerialeResults(results, targetInputId, dropId) {
   const drop = document.getElementById(dropId);
   if (!results.length) { drop.style.display = 'none'; return; }
   drop.innerHTML = results.map((r,idx) =>
-    `<div onclick="_selezionaStrumento(${r.clienteId},'${escJsAttr(r.modello)}','${escJsAttr(r.seriale)}','${escJsAttr(dropId)}')"
+    `<div onclick="_selezionaStrumento(${r.clienteId},'${escJsAttr(r.modello)}','${escJsAttr(r.seriale)}',${r.fornitoreId||'null'},'${escJsAttr(dropId)}')"
       style="padding:9px 14px;cursor:pointer;border-bottom:1px solid var(--border);font-size:0.86rem;"
       onmouseenter="this.style.background='var(--surface2)'" onmouseleave="this.style.background=''">
       <span style="font-family:monospace;font-weight:700;color:var(--accent);">${escHtml(r.seriale)}</span>
@@ -6653,11 +6707,19 @@ function cercaPerSerialeField() {
   _renderSerialeResults(results, 'i_seriale', 'i_seriale_results');
 }
 
-function _selezionaStrumento(clienteId, modello, seriale, dropId) {
+function _selezionaStrumento(clienteId, modello, seriale, fornitoreId, dropId) {
   document.getElementById('i_cliente').value = clienteId;
   aggiornaStrumentiCliente();
   document.getElementById('i_strumento').value = modello;
   document.getElementById('i_seriale').value = seriale;
+  // Lo strumento porta con sé il fornitore associato in scheda cliente: lo selezioniamo qui
+  // (se compatibile con l'elenco fornitori-con-tariffa) e lasciamo che aggiorni anche il
+  // progressivo dell'intervento (es. numerazione INTELSINT), come per una scelta manuale.
+  const selFor = document.getElementById('i_fornitore_id');
+  if (selFor) {
+    selFor.value = fornitoreId ? String(fornitoreId) : '';
+    aggiornaNumeroInterventoPerFornitore();
+  }
   document.getElementById(dropId).style.display = 'none';
   if (document.getElementById('i_cerca_seriale')) {
     document.getElementById('i_cerca_seriale').value = '';
@@ -6675,14 +6737,28 @@ function aggiornaStrumentiCliente() {
   dl.innerHTML = strumenti.map(s =>
     `<option value="${escRaw(s.modello)}" data-seriale="${escRaw(s.seriale)}">${escHtml(s.modello)}${s.seriale?' — S/N: '+escHtml(s.seriale):''}</option>`
   ).join('');
+  const selFor = document.getElementById('i_fornitore_id');
   if (strumenti.length === 1) {
     document.getElementById('i_strumento').value = strumenti[0].modello||'';
     document.getElementById('i_seriale').value   = strumenti[0].seriale||'';
+    // Unico strumento del cliente: il suo fornitore associato è inequivocabile, lo selezioniamo
+    // subito (aggiornando di conseguenza anche il progressivo dell'intervento se necessario).
+    if (selFor) {
+      selFor.value = strumenti[0].fornitoreId ? String(strumenti[0].fornitoreId) : '';
+      aggiornaNumeroInterventoPerFornitore();
+    }
   } else {
     document.getElementById('i_strumento').value = '';
     document.getElementById('i_seriale').value   = '';
+    // Più strumenti (o nessuno): il fornitore non è ancora determinabile, si riparte da vuoto
+    // finché l'utente non sceglie lo strumento specifico (aggiornaSerial se lo digita/seleziona
+    // dalla lista, oppure la ricerca per matricola).
+    if (selFor) {
+      selFor.value = '';
+      aggiornaNumeroInterventoPerFornitore();
+    }
   }
-  
+
   // Auto-popolamento Km Reali dal cliente
   document.getElementById('i_km_reali').value = cl.km_reali || '';
 
@@ -6710,6 +6786,15 @@ function aggiornaSerial() {
   const strumenti = cl.strumentiInstallati || migraStrumenti(cl.strumenti||'');
   const match = strumenti.find(s => (s.modello||'').toLowerCase() === val.toLowerCase());
   if (match && match.seriale) document.getElementById('i_seriale').value = match.seriale;
+  // Strumento riconosciuto dal nome (es. selezionato dalla lista suggerimenti del cliente):
+  // selezioniamo anche il suo fornitore associato, come per la ricerca per matricola.
+  if (match) {
+    const selFor = document.getElementById('i_fornitore_id');
+    if (selFor) {
+      selFor.value = match.fornitoreId ? String(match.fornitoreId) : '';
+      aggiornaNumeroInterventoPerFornitore();
+    }
+  }
 }
 
 // Part rows
