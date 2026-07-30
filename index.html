@@ -133,9 +133,9 @@
       position: sticky;
       top: 48px;
       z-index: 999;
-      scrollbar-width: none;
+      scrollbar-width: thin;
     }
-    nav::-webkit-scrollbar { display: none; }
+    nav::-webkit-scrollbar { height: 6px; }
     nav button {
       background: none;
       border: none;
@@ -3069,7 +3069,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.7.10';
+const APP_VERSION = '2.7.11';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
