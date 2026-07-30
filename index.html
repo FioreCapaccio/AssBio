@@ -3069,7 +3069,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.7.9';
+const APP_VERSION = '2.7.10';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -6593,9 +6593,13 @@ function aggiornaNumeroInterventoPerFornitore() {
   const numEl = document.getElementById('i_numero');
   if (!numEl) return;
   const fid = parseInt(document.getElementById('i_fornitore_id')?.value) || 0;
-  numEl.value = _isFornitoreIntelsint(fid)
-    ? _prossimoNumeroIntelsint()
-    : 'WO-' + String(DB._nextId.intervento).padStart(4, '0');
+  // Il progressivo automatico riguarda SOLO Intelsint: per qualunque altro fornitore (o
+  // nessuno) il numero non va mai toccato, altrimenti un numero di verbale inserito a mano
+  // per un cliente/fornitore diverso da Intelsint veniva silenziosamente sostituito dal
+  // progressivo standard WO-XXXX ad ogni cambio di cliente/strumento/fornitore.
+  if (_isFornitoreIntelsint(fid)) {
+    numEl.value = _prossimoNumeroIntelsint();
+  }
 }
 
 // BUG FIX (consolidamento formula importo): questa formula era duplicata in 5 punti diversi
