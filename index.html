@@ -136,6 +136,23 @@
       scrollbar-width: thin;
     }
     nav::-webkit-scrollbar { height: 6px; }
+    .hscroll-wrap { position: relative; }
+    .hscroll-arrow {
+      position: absolute; top: 0; bottom: 0; width: 26px;
+      display: flex; align-items: center; justify-content: center;
+      border: none; cursor: pointer; z-index: 1000;
+      font-size: 18px; font-weight: 700; line-height: 1;
+      color: var(--text); opacity: 0; pointer-events: none;
+      transition: opacity 0.15s ease;
+      background: linear-gradient(to right, var(--surface-glass) 45%, transparent);
+    }
+    .hscroll-arrow-right {
+      right: 0;
+      background: linear-gradient(to left, var(--surface-glass) 45%, transparent);
+    }
+    .hscroll-arrow-left { left: 0; }
+    .hscroll-arrow.show { opacity: 1; pointer-events: auto; }
+    .hscroll-arrow:hover { color: var(--accent); }
     nav button {
       background: none;
       border: none;
@@ -1236,6 +1253,7 @@
         </select>
       </div>
       <div class="toolbar-right">
+        <button class="btn btn-ghost" onclick="openInventarioExcelImportModal()" title="Importa un file Excel con codice e giacenza per allineare l'archivio">📥 Importa Excel (Allinea giacenze)</button>
         <button class="btn btn-primary" onclick="openInventarioFisicoModal()">📱 Inventario Fisico</button>
       </div>
     </div>
@@ -1327,6 +1345,58 @@
             <button class="btn btn-primary" id="btnConfermaInvFisico" onclick="confermaSalvaInventarioFisico()">✅ Conferma aggiornamento</button>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- INVENTARIO IMPORT EXCEL (ALLINEAMENTO GIACENZE) MODAL -->
+  <div class="modal-overlay" id="modalInventarioExcelImport" onclick="closeModal('modalInventarioExcelImport')">
+    <div class="modal modal-lg" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3>📥 Allineamento Giacenze da Excel</h3>
+        <button class="modal-close" onclick="closeModal('modalInventarioExcelImport')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="invImpStep1">
+          <div class="form-group">
+            <label for="invimp_fornitore">Fornitore (facoltativo)</label>
+            <select id="invimp_fornitore">
+              <option value="">-- Nessuno / generico --</option>
+            </select>
+            <small style="color:var(--text-muted);">Se indicato, le rettifiche di magazzino generate da questo allineamento verranno associate a questo fornitore.</small>
+          </div>
+          <p style="margin-top:16px;">1. Carica il file Excel con l'elenco codici e le relative giacenze da confrontare con l'archivio.</p>
+          <div style="border:2px dashed var(--border); padding:30px; text-align:center; border-radius:12px; margin:12px 0; cursor:pointer;"
+               onclick="document.getElementById('invImpFile').click()"
+               id="invImpDropZone"
+               ondragover="handleInvImpDragOver(event)"
+               ondragleave="handleInvImpDragLeave(event)"
+               ondrop="handleInvImpDrop(event)">
+            <div style="font-size:2.5rem; margin-bottom:10px;">📊</div>
+            <div style="font-weight:600;">Trascina qui il file o clicca per selezionare</div>
+            <div style="font-size:0.8rem; color:var(--text-muted); margin-top:5px;">Formati supportati: .xlsx, .xls</div>
+            <input type="file" id="invImpFile" accept=".xlsx,.xls" style="display:none" onchange="handleInvImpFile(event)">
+          </div>
+        </div>
+        <div id="invImpStep2" style="display:none;">
+          <p>2. Associa le colonne del file Excel ai dati richiesti.</p>
+          <div style="margin-top:16px; overflow-x:auto;">
+            <table class="table" style="width:100%;">
+              <thead>
+                <tr style="background:var(--surface2);">
+                  <th style="padding:10px; text-align:left;">Campo richiesto</th>
+                  <th style="padding:10px; text-align:left;">Colonna Excel</th>
+                  <th style="padding:10px; text-align:left;">Esempio Valore (Riga 1)</th>
+                </tr>
+              </thead>
+              <tbody id="invImpMappingBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('modalInventarioExcelImport')">Annulla</button>
+        <button class="btn btn-primary" id="btnInvImpAvvia" style="display:none;" onclick="eseguiAllineamentoGiacenzeExcel()">Genera anteprima allineamento</button>
       </div>
     </div>
   </div>
@@ -3069,7 +3139,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.7.11';
+const APP_VERSION = '2.7.13';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -3705,6 +3775,51 @@ function initMultiTabGuard() {
   window.addEventListener('focus', _refreshNextIdFromStorage);
 }
 
+// ======================== SCROLL ORIZZONTALE (frecce sempre visibili) ========================
+// macOS (trackpad) nasconde la scrollbar nativa a riposo anche con scrollbar-width:thin,
+// quindi affianchiamo alla scrollbar nativa delle frecce cliccabili sempre visibili quando
+// il contenuto eccede la larghezza disponibile, indipendenti dalle impostazioni di sistema.
+const _hScrollRegistry = [];
+function _setupHScrollArrows(el) {
+  if (!el || el._hScrollInit) return;
+  el._hScrollInit = true;
+  const wrap = document.createElement('div');
+  wrap.className = 'hscroll-wrap';
+  el.parentNode.insertBefore(wrap, el);
+  wrap.appendChild(el);
+  const btnL = document.createElement('button');
+  btnL.type = 'button';
+  btnL.className = 'hscroll-arrow hscroll-arrow-left';
+  btnL.innerHTML = '‹';
+  btnL.setAttribute('aria-label', 'Scorri a sinistra');
+  const btnR = document.createElement('button');
+  btnR.type = 'button';
+  btnR.className = 'hscroll-arrow hscroll-arrow-right';
+  btnR.innerHTML = '›';
+  btnR.setAttribute('aria-label', 'Scorri a destra');
+  wrap.appendChild(btnL);
+  wrap.appendChild(btnR);
+  const step = () => Math.max(120, el.clientWidth * 0.6);
+  btnL.addEventListener('click', () => el.scrollBy({ left: -step(), behavior: 'auto' }));
+  btnR.addEventListener('click', () => el.scrollBy({ left: step(), behavior: 'auto' }));
+  const update = () => {
+    const scrollable = el.scrollWidth > el.clientWidth + 2;
+    btnL.classList.toggle('show', scrollable && el.scrollLeft > 2);
+    btnR.classList.toggle('show', scrollable && el.scrollLeft < el.scrollWidth - el.clientWidth - 2);
+  };
+  el.addEventListener('scroll', update, { passive: true });
+  _hScrollRegistry.push(update);
+  update();
+}
+function initHScrollHints() {
+  document.querySelectorAll('nav.glass, .table-wrap').forEach(_setupHScrollArrows);
+  window.addEventListener('resize', () => _hScrollRegistry.forEach(fn => fn()));
+  // Il contenuto delle tabelle cambia larghezza a runtime (filtri, nuove righe, colonne
+  // condizionali) senza scatenare resize/scroll: un ricontrollo periodico leggero copre
+  // questi casi senza bisogno di agganciarsi a ogni singola funzione di render.
+  setInterval(() => _hScrollRegistry.forEach(fn => fn()), 800);
+}
+
 // ======================== INIT ========================
 document.addEventListener('DOMContentLoaded', () => {
  // BUG FIX: prima solo SUPABASE.init() aveva un try/catch dedicato — un errore imprevisto
@@ -3802,6 +3917,8 @@ window.addEventListener('beforeunload', () => {
     try { if (DB._loaded) DB.save(); } catch (e) {}
     _scriviAutoBackup();
   });
+
+  try { initHScrollHints(); } catch (e) { console.warn('initHScrollHints fallita:', e); }
  } catch (e) {
   console.error('Errore durante l\'avvio dell\'app:', e);
   try { mostraToast('❌ Errore durante l\'avvio: ' + (e.message || e) + '. Ricarica la pagina; se il problema persiste, contatta l\'assistenza.', 'danger'); } catch (e2) {}
@@ -3937,11 +4054,13 @@ function renderAll(section) {
 }
 
 function openInventarioFisicoModal() {
+  _inventarioFisicoFornitore = ''; // sessione manuale: nessun fornitore associato alle rettifiche
   openModal('modalInventarioFisico');
   setTimeout(() => document.getElementById('inv_scan_codice').focus(), 300);
 }
 
 let _inventarioFisico = [];
+let _inventarioFisicoFornitore = ''; // valorizzato solo dall'allineamento guidato da Excel
 
 function aggiungiRigaInventarioFisico() {
   const input = document.getElementById('inv_scan_codice');
@@ -4105,8 +4224,10 @@ function confermaSalvaInventarioFisico() {
             qta: diff,
             scadenza: '',
             carico: today(),
-            fornitore: 'Inventario Fisico',
-            note: `Rettifica da inventario fisico. Qta precedente: ${vecchiaQta}`
+            fornitore: _inventarioFisicoFornitore || 'Inventario Fisico',
+            note: _inventarioFisicoFornitore
+              ? `Rettifica da allineamento Excel (fornitore: ${_inventarioFisicoFornitore}). Qta precedente: ${vecchiaQta}`
+              : `Rettifica da inventario fisico. Qta precedente: ${vecchiaQta}`
           });
         }
       }
@@ -4120,10 +4241,189 @@ function confermaSalvaInventarioFisico() {
   mostraToast(`Inventario fisico salvato! ${aggiornati} articoli aggiornati.`, 'success');
   _invFisicoConfSaving = false;
   _inventarioFisico = [];
+  _inventarioFisicoFornitore = '';
   renderTbInventarioFisico();
   document.getElementById('inv_preview_section').style.display = 'none';
   document.getElementById('inv_scanner_section').style.display = '';
   closeModal('modalInventarioFisico');
+}
+
+// ======================== ALLINEAMENTO GIACENZE DA EXCEL ========================
+// Importazione guidata: l'utente carica un file Excel con codice+giacenza, mappa le
+// colonne, ed il flusso riusa la stessa pipeline di conferma/preview dell'Inventario
+// Fisico a scanner (_inventarioFisico, salvaInventarioFisico, confermaSalvaInventarioFisico)
+// così le rettifiche restano coerenti con lotti/FIFO già gestiti da quel percorso.
+let _invImpData = { headers: [], rows: [] };
+
+const INVIMP_FIELDS = [
+  { id: 'codice', label: 'Codice Ricambio', required: true, hints: ['codice', 'cod', 'sku', 'articolo'] },
+  { id: 'giacenza', label: 'Giacenza (quantità)', required: true, hints: ['giacenza', 'qta', 'quantit', 'stock', 'qty'] }
+];
+
+function openInventarioExcelImportModal() {
+  _invImpData = { headers: [], rows: [] };
+  document.getElementById('invImpStep1').style.display = 'block';
+  document.getElementById('invImpStep2').style.display = 'none';
+  document.getElementById('btnInvImpAvvia').style.display = 'none';
+  document.getElementById('invImpFile').value = '';
+
+  const fornList = DB.fornitori.map(f => f.ragione);
+  const extraForn = [...new Set(DB.ricambi.map(r => r.fornitore).filter(Boolean).filter(n => !DB.fornitori.find(f => f.ragione === n)))];
+  const allForn = [...new Set([...fornList, ...extraForn])].sort();
+  const sel = document.getElementById('invimp_fornitore');
+  sel.innerHTML = '<option value="">-- Nessuno / generico --</option>' +
+    allForn.map(n => `<option value="${escAttr(n)}">${escHtml(n)}</option>`).join('');
+
+  openModal('modalInventarioExcelImport');
+}
+
+function handleInvImpFile(event) {
+  const file = event.target.files ? event.target.files[0] : event.dataTransfer.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const workbook = XLSX.read(data, { type: 'array' });
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+      if (jsonData.length < 2) {
+        mostraToast('Il file Excel sembra vuoto o non contiene abbastanza dati.');
+        return;
+      }
+      _invImpData.headers = jsonData[0];
+      _invImpData.rows = jsonData.slice(1).filter(r => r && r.length && r.some(c => c !== undefined && c !== ''));
+      preparaMappingInvImp();
+    } catch (err) {
+      console.error('Errore lettura file Excel (allineamento giacenze):', err);
+      mostraToast('❌ Impossibile leggere il file: non è un Excel valido, è corrotto o protetto da password.', 'danger');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function handleInvImpDragOver(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const dz = document.getElementById('invImpDropZone');
+  if (dz) { dz.style.borderColor = 'var(--accent)'; dz.style.background = 'var(--surface2)'; }
+}
+
+function handleInvImpDragLeave(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const dz = document.getElementById('invImpDropZone');
+  if (dz) { dz.style.borderColor = 'var(--border)'; dz.style.background = ''; }
+}
+
+function handleInvImpDrop(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const dz = document.getElementById('invImpDropZone');
+  if (dz) { dz.style.borderColor = 'var(--border)'; dz.style.background = ''; }
+  handleInvImpFile(e);
+}
+
+function preparaMappingInvImp() {
+  const tbody = document.getElementById('invImpMappingBody');
+  const headers = _invImpData.headers;
+  const firstRow = _invImpData.rows[0] || [];
+
+  tbody.innerHTML = INVIMP_FIELDS.map(field => {
+    const autoIdx = headers.findIndex(h => {
+      const hn = String(h || '').toLowerCase();
+      return field.hints.some(hint => hn.includes(hint));
+    });
+    const options = ['<option value="">-- Non mappata --</option>'] +
+      headers.map((h, idx) => `<option value="${idx}" ${idx === autoIdx ? 'selected' : ''}>Colonna: ${escHtml(h)}</option>`).join('');
+
+    return `
+      <tr>
+        <td style="padding:10px;">
+          <div style="font-weight:600;">${escHtml(field.label)}</div>
+          ${field.required ? '<small style="color:var(--danger);">* Obbligatorio</small>' : ''}
+        </td>
+        <td style="padding:10px;">
+          <select class="form-control invimp-mapping-select" data-field-id="${escAttr(field.id)}">
+            ${options}
+          </select>
+        </td>
+        <td style="padding:10px; color:var(--text-muted); font-size:0.85rem;">
+          ${autoIdx !== -1 && firstRow[autoIdx] !== undefined ? escHtml(firstRow[autoIdx]) : '-'}
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  document.getElementById('invImpStep1').style.display = 'none';
+  document.getElementById('invImpStep2').style.display = 'block';
+  document.getElementById('btnInvImpAvvia').style.display = 'inline-flex';
+}
+
+function eseguiAllineamentoGiacenzeExcel() {
+  const selects = document.querySelectorAll('.invimp-mapping-select');
+  const mapping = {};
+  selects.forEach(sel => {
+    const fieldId = sel.dataset.fieldId;
+    const colIdx = sel.value;
+    if (colIdx !== '') mapping[fieldId] = parseInt(colIdx);
+  });
+
+  if (mapping.codice === undefined || mapping.giacenza === undefined) {
+    mostraToast('Associa sia la colonna "Codice Ricambio" sia la colonna "Giacenza".', 'warning');
+    return;
+  }
+
+  const fornitoreSel = (document.getElementById('invimp_fornitore').value || '').trim();
+
+  // Aggrega per codice (somma eventuali righe duplicate) prima del confronto con l'archivio
+  const totali = new Map();
+  let righeSaltate = 0;
+  _invImpData.rows.forEach(row => {
+    const codice = String(row[mapping.codice] ?? '').trim();
+    const qta = parseFloat(String(row[mapping.giacenza] ?? '').replace(',', '.'));
+    if (!codice || isNaN(qta)) { righeSaltate++; return; }
+    const key = codice.toUpperCase();
+    if (totali.has(key)) {
+      totali.get(key).qta += qta;
+    } else {
+      totali.set(key, { codiceOriginale: codice, qta });
+    }
+  });
+
+  if (totali.size === 0) {
+    mostraToast('Nessuna riga valida trovata nel file (controlla il mapping delle colonne).', 'danger');
+    return;
+  }
+
+  const nonTrovati = [];
+  _inventarioFisico = [];
+  totali.forEach(({ codiceOriginale, qta }, key) => {
+    const r = DB.ricambi.find(x => String(x.codice || '').toUpperCase() === key);
+    if (!r) { nonTrovati.push(codiceOriginale); return; }
+    _inventarioFisico.push({ id: r.id, codice: r.codice, descrizione: r.descrizione, qta: Math.max(0, Math.round(qta)) });
+  });
+
+  if (!_inventarioFisico.length) {
+    mostraToast('Nessuno dei codici presenti nel file corrisponde a un ricambio in archivio.', 'danger');
+    return;
+  }
+
+  _inventarioFisicoFornitore = fornitoreSel;
+
+  closeModal('modalInventarioExcelImport');
+  openModal('modalInventarioFisico');
+  renderTbInventarioFisico();
+  salvaInventarioFisico();
+
+  if (nonTrovati.length) {
+    mostraToast(`⚠️ ${nonTrovati.length} codice/i del file non trovati in archivio e ignorati: ${nonTrovati.slice(0, 8).join(', ')}${nonTrovati.length > 8 ? '…' : ''}`, 'warning');
+  }
+  if (righeSaltate) {
+    console.warn(`Allineamento giacenze: ${righeSaltate} riga/e saltate (codice o giacenza mancante/non numerica).`);
+  }
 }
 
 function renderInventarioDettagliato() {
