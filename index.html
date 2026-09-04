@@ -1963,6 +1963,10 @@
         <div id="formFirmaWrap" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;background:var(--surface2);border-radius:8px;">
           <img id="formFirmaThumb" style="display:none;height:46px;max-width:150px;object-fit:contain;background:#fff;border:1px solid var(--border);border-radius:6px;">
           <span id="formFirmaStatus" style="font-size:0.8rem;color:var(--text-muted);">Nessuna firma grafica associata.</span>
+          <div id="formFirmaDataWrap" style="display:none;align-items:center;gap:5px;">
+            <label for="formFirmaData" style="font-size:0.72rem;color:var(--text-muted);white-space:nowrap;">Data firma</label>
+            <input type="date" id="formFirmaData" style="height:30px;font-size:0.8rem;" onchange="_onCambioDataFirmaForm()">
+          </div>
           <div style="flex:1;"></div>
           <select id="formFirmaArchivioSel" onchange="_usaFirmaArchivioForm()" style="display:none;max-width:220px;">
             <option value="">📁 Usa firma archiviata...</option>
@@ -3194,7 +3198,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.7.17 • 04 set 2026';
+const APP_VERSION = '2.7.18 • 04 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -6889,18 +6893,22 @@ function _aggiornaWidgetFirmaForm() {
   const status = document.getElementById('formFirmaStatus');
   const btnRimuovi = document.getElementById('btnRimuoviFirmaForm');
   const sel = document.getElementById('formFirmaArchivioSel');
+  const dataWrap = document.getElementById('formFirmaDataWrap');
+  const dataInput = document.getElementById('formFirmaData');
 
   if (_formFirmaCliente?.dataUrl) {
     thumb.src = _formFirmaCliente.dataUrl;
     thumb.style.display = '';
     const chi = _formFirmaCliente.nomeFirmatario ? ' — ' + _formFirmaCliente.nomeFirmatario : '';
-    const dt = _formFirmaCliente.data ? ' (' + new Date(_formFirmaCliente.data).toLocaleDateString('it-IT') + ')' : '';
-    status.textContent = 'Firma acquisita' + chi + dt;
+    status.textContent = 'Firma acquisita' + chi;
     btnRimuovi.style.display = '';
+    if (dataWrap) dataWrap.style.display = 'flex';
+    if (dataInput) dataInput.value = _formFirmaCliente.data ? new Date(_formFirmaCliente.data).toISOString().split('T')[0] : today();
   } else {
     thumb.style.display = 'none';
     status.textContent = 'Nessuna firma grafica associata.';
     btnRimuovi.style.display = 'none';
+    if (dataWrap) dataWrap.style.display = 'none';
   }
 
   const clienteId = parseInt(document.getElementById('i_cliente')?.value) || null;
@@ -6922,6 +6930,14 @@ function _aggiornaWidgetFirmaForm() {
   }
 }
 
+// Applica la data scelta dall'utente nel campo "Data firma" alla firma in sospeso.
+function _onCambioDataFirmaForm() {
+  if (!_formFirmaCliente) return;
+  const val = document.getElementById('formFirmaData')?.value;
+  if (!val) return;
+  _formFirmaCliente.data = new Date(val).toISOString();
+}
+
 function _usaFirmaArchivioForm() {
   const sel = document.getElementById('formFirmaArchivioSel');
   const idx = parseInt(sel?.value);
@@ -6930,9 +6946,19 @@ function _usaFirmaArchivioForm() {
   const cliente = clienteId ? DB.clienti.find(c => c.id === clienteId) : null;
   const f = cliente?.firme?.[idx];
   if (!f) return;
-  _formFirmaCliente = { dataUrl: f.dataUrl, nomeFirmatario: f.nomeFirmatario || '', data: f.data || new Date().toISOString() };
+  // La firma può essere stata archiviata molto tempo fa: non va MAI riproposta con quella
+  // vecchia data. Si parte dalla data dell'intervento (o da oggi) e si chiede subito
+  // all'utente di confermarla/correggerla nel campo "Data firma" appena mostrato.
+  const dataDefault = document.getElementById('i_data')?.value || today();
+  _formFirmaCliente = { dataUrl: f.dataUrl, nomeFirmatario: f.nomeFirmatario || '', data: new Date(dataDefault).toISOString() };
+  sel.value = '';
   _aggiornaWidgetFirmaForm();
-  mostraToast?.('📁 Firma archiviata selezionata', 'success');
+  const dataInput = document.getElementById('formFirmaData');
+  // showPicker() richiede un gesto utente "fresco": può rifiutarsi (NotAllowedError) in
+  // alcuni browser/contesti anche a fronte di un click reale — non deve mai bloccare il
+  // resto del flusso (toast compreso), il campo resta comunque visibile e modificabile.
+  if (dataInput) { dataInput.focus(); try { dataInput.showPicker?.(); } catch (e) {} }
+  mostraToast?.('📁 Firma archiviata selezionata — controlla/imposta la data da riportare sul verbale', 'success');
 }
 
 function rimuoviFirmaFormIntervento() {
