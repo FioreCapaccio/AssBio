@@ -2342,6 +2342,10 @@
       <h3>📄 Anteprima verbale — <span id="anteprimaVerbaleTitolo"></span></h3>
       <button class="modal-close" onclick="closeModal('modalAnteprimaVerbale')">✕</button>
     </div>
+    <div id="verbaleFirmaSelWrap" style="display:none;padding:10px 20px;border-bottom:1px solid var(--border);align-items:center;gap:10px;">
+      <label for="verbaleFirmaSel" style="font-size:0.8rem;font-weight:600;white-space:nowrap;">✍️ Firma da inserire</label>
+      <select id="verbaleFirmaSel" onchange="_onCambioFirmaVerbale()" style="flex:1;max-width:400px;"></select>
+    </div>
     <div style="flex:1;padding:0;overflow:hidden;background:#f5f5f5;">
       <iframe id="iframeAnteprimaVerbale" style="width:100%;height:100%;border:none;background:#fff;"></iframe>
     </div>
@@ -3177,7 +3181,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.7.15 • 13 ago 2026';
+const APP_VERSION = '2.7.16 • 04 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4658,7 +4662,66 @@ function mostraFatturato() {
   card.onclick = () => showSection('interventi');
 }
 
+// Firme disponibili per il verbale di un intervento: quella disegnata direttamente per
+// QUESTO intervento (se presente) più quelle salvate in archivio sulla scheda cliente
+// (galleria "cliente.firme[]", max 3, alimentata da apriFirmaCliente/salvaFirmaGenerica).
+// Stessa idea già usata dal flusso "PDF Intervento" (vedi _pdfInterventoFirmeDisponibili),
+// duplicata qui perché i due flussi sono indipendenti e non condividono stato.
+let _verbaleFirmeDisponibili = [];
+function _elencaFirmeVerbale(i) {
+  const elenco = [];
+  if (i.firmaClienteImg) {
+    elenco.push({
+      value: 'intervento',
+      dataUrl: i.firmaClienteImg,
+      data: i.firmaClienteImgMeta?.data || '',
+      nome: i.firmaClienteImgMeta?.nomeFirmatario || i.firmaCliente || '',
+      label: 'Firma di questo intervento' + (i.firmaClienteImgMeta?.data ? ' (' + new Date(i.firmaClienteImgMeta.data).toLocaleDateString('it-IT') + ')' : '')
+    });
+  }
+  const cliente = DB.clienti.find(c => c.id === i.clienteId);
+  (cliente?.firme || []).forEach((f, idx) => {
+    const chi = f.nomeFirmatario ? f.nomeFirmatario + ' - ' : '';
+    elenco.push({
+      value: 'cliente_' + idx,
+      dataUrl: f.dataUrl,
+      data: f.data || '',
+      nome: f.nomeFirmatario || '',
+      label: 'Firma archiviata: ' + chi + (f.data ? new Date(f.data).toLocaleDateString('it-IT') : '—')
+    });
+  });
+  return elenco;
+}
+function _firmaVerbaleScelta() {
+  const val = document.getElementById('verbaleFirmaSel')?.value;
+  if (!val) return null;
+  return _verbaleFirmeDisponibili.find(f => f.value === val) || null;
+}
+function _onCambioFirmaVerbale() {
+  _renderAnteprimaVerbaleIframe();
+}
+
 function apriAnteprimaVerbale() {
+  const i = DB.interventi.find(x => x.id === currentPdfInterventoId);
+  if (!i) return;
+
+  _verbaleFirmeDisponibili = _elencaFirmeVerbale(i);
+  const selWrap = document.getElementById('verbaleFirmaSelWrap');
+  const sel = document.getElementById('verbaleFirmaSel');
+  const escOpt = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (sel) {
+    sel.innerHTML = '<option value="">-- Nessuna firma --</option>' +
+      _verbaleFirmeDisponibili.map(f => `<option value="${f.value}">${escOpt(f.label)}</option>`).join('');
+    sel.value = _verbaleFirmeDisponibili.length ? _verbaleFirmeDisponibili[0].value : '';
+  }
+  if (selWrap) selWrap.style.display = _verbaleFirmeDisponibili.length ? 'flex' : 'none';
+
+  document.getElementById('anteprimaVerbaleTitolo').textContent = i.numero;
+  openModal('modalAnteprimaVerbale');
+  _renderAnteprimaVerbaleIframe();
+}
+
+function _renderAnteprimaVerbaleIframe() {
   const i = DB.interventi.find(x => x.id === currentPdfInterventoId);
   if (!i) return;
   const cl = DB.clienti.find(c => c.id === i.clienteId);
@@ -5582,15 +5645,21 @@ ${i.ricambi.map(p=>{
   return `<tr><td>${esc(r?r.codice:'—')}</td><td>${esc(r?r.descrizione:'—')}</td><td>${p.qta}</td><td>${esc(r?r.um:'pz')}</td><td>${esc(l?l.lotto:(p.lottoId?'(rimosso)':'—'))}</td></tr>`;
 }).join('')}
 </tbody></table></div>`:''}
-<div style="margin-top:24px;display:flex;justify-content:space-between;font-size:11px;color:#555;border-top:1px solid #ddd;padding-top:12px;">
+${(() => {
+  const firmaScelta = _firmaVerbaleScelta();
+  const firmaHtml = firmaScelta
+    ? `<div><img src="${firmaScelta.dataUrl}" style="height:50px;max-width:180px;object-fit:contain;display:block;margin:0 0 3px auto;">
+         <strong>Firma cliente:</strong> ${esc(firmaScelta.nome || i.firmaCliente || '—')}${firmaScelta.data ? ' — ' + new Date(firmaScelta.data).toLocaleDateString('it-IT') : ''}
+       </div>`
+    : `<div><strong>Firma cliente:</strong> ${esc(i.firmaCliente||'_____________________')}</div>`;
+  return `<div style="margin-top:24px;display:flex;justify-content:space-between;align-items:flex-end;font-size:11px;color:#555;border-top:1px solid #ddd;padding-top:12px;">
   <div><strong>Tecnico:</strong> ${esc(i.tecnico||'—')}</div>
-  <div><strong>Firma cliente:</strong> ${esc(i.firmaCliente||'_____________________')}</div>
-</div>
+  ${firmaHtml}
+</div>`;
+})()}
 </body></html>`;
 
-  document.getElementById('anteprimaVerbaleTitolo').textContent = i.numero;
   document.getElementById('iframeAnteprimaVerbale').srcdoc = html;
-  openModal('modalAnteprimaVerbale');
 }
 
 function stampaIframeVerbale() {
@@ -13670,19 +13739,31 @@ function stampaPDF() {
     y = doc.lastAutoTable.finalY + 8;
   }
 
-  // Firme
+  // Firme — usa la firma scelta nel selettore dell'anteprima (disegnata per l'intervento
+  // oppure recuperata dall'archivio del cliente), se presente, altrimenti solo il nome.
+  const firmaSceltaPdf = (typeof _firmaVerbaleScelta === 'function') ? _firmaVerbaleScelta() : null;
+  const rightX = ml + cw/2;
+  let imgH = 0;
   if (y > 240) { doc.addPage(); y = 20; }
   y = sectionTitle('Firme', y);
   doc.setFontSize(9);
   doc.text('Tecnico: ' + (i.tecnico||'—'), ml, y);
-  doc.text('Cliente: ' + (i.firmaCliente||'—'), ml + cw/2, y);
-  y += 12;
+  doc.text('Cliente: ' + (firmaSceltaPdf?.nome || i.firmaCliente || '—'), rightX, y);
+  if (firmaSceltaPdf?.dataUrl) {
+    const imgW = Math.min(50, cw/2 - 10);
+    imgH = imgW * (340/860); // proporzione del pad di firma (860x340)
+    try { doc.addImage(firmaSceltaPdf.dataUrl, 'PNG', rightX, y + 3, imgW, imgH); } catch(e) {}
+  }
+  y += 12 + imgH;
   doc.setDrawColor(180,180,180);
   doc.line(ml, y, ml + cw/2 - 10, y);
-  doc.line(ml + cw/2, y, ml + cw, y);
+  doc.line(rightX, y, ml + cw, y);
   doc.setFontSize(7); doc.setTextColor(150,150,150);
   doc.text('Firma tecnico', ml, y+3);
-  doc.text('Firma e timbro cliente', ml + cw/2, y+3);
+  doc.text('Firma e timbro cliente', rightX, y+3);
+  if (firmaSceltaPdf?.data) {
+    doc.text('Firmato il ' + new Date(firmaSceltaPdf.data).toLocaleDateString('it-IT'), rightX, y+7);
+  }
 
   // Footer
   const totalPages = doc.internal.getNumberOfPages();
