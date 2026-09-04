@@ -1958,6 +1958,19 @@
           <input type="text" id="i_firma_cliente" placeholder="Nome e cognome referente">
         </div>
       </div>
+      <div class="form-group">
+        <label>Firma cliente (grafica)</label>
+        <div id="formFirmaWrap" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;background:var(--surface2);border-radius:8px;">
+          <img id="formFirmaThumb" style="display:none;height:46px;max-width:150px;object-fit:contain;background:#fff;border:1px solid var(--border);border-radius:6px;">
+          <span id="formFirmaStatus" style="font-size:0.8rem;color:var(--text-muted);">Nessuna firma grafica associata.</span>
+          <div style="flex:1;"></div>
+          <select id="formFirmaArchivioSel" onchange="_usaFirmaArchivioForm()" style="display:none;max-width:220px;">
+            <option value="">📁 Usa firma archiviata...</option>
+          </select>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="apriFirmaFormIntervento()">✍️ Firma ora</button>
+          <button type="button" class="btn btn-outline-danger btn-sm" id="btnRimuoviFirmaForm" style="display:none;" onclick="rimuoviFirmaFormIntervento()">🗑️ Rimuovi</button>
+        </div>
+      </div>
 
       <div class="section-sep">Valorizzazione economica</div>
       <div class="form-grid">
@@ -2785,7 +2798,7 @@
   <div class="modal" style="max-width:900px;width:96%;">
     <div class="modal-header">
       <h3>✍️ Firma cliente</h3>
-      <button class="modal-close" onclick="closeModal('modalFirmaGenerica')">✕</button>
+      <button class="modal-close" onclick="_firmaGenericaModoForm=false; closeModal('modalFirmaGenerica')">✕</button>
     </div>
     <div class="modal-body">
       <p id="firmaGenericaIntro" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:10px;">Fai firmare il cliente qui sotto per confermare l'intervento.</p>
@@ -2800,7 +2813,7 @@
         <button class="btn btn-ghost btn-sm" onclick="pulisciFirmaGenerica()">🗑️ Pulisci</button>
         <div style="display:flex;gap:8px;">
           <button class="btn btn-ghost btn-sm" onclick="esportaFirmaTrasparente()" title="Scarica la firma come PNG con sfondo trasparente">🖼️ Esporta PNG trasparente</button>
-          <button class="btn btn-ghost btn-sm" onclick="closeModal('modalFirmaGenerica')">Annulla</button>
+          <button class="btn btn-ghost btn-sm" onclick="_firmaGenericaModoForm=false; closeModal('modalFirmaGenerica')">Annulla</button>
           <button class="btn btn-primary btn-sm" onclick="salvaFirmaGenerica()">💾 Salva firma</button>
         </div>
       </div>
@@ -3181,7 +3194,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.7.16 • 04 set 2026';
+const APP_VERSION = '2.7.17 • 04 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -6863,6 +6876,82 @@ function renderClienti() {
 let editInterventoId = null;
 let currentPdfInterventoId = null;
 
+// Firma grafica "in sospeso" per la scheda di inserimento/modifica intervento attualmente
+// aperta: null finché non viene disegnata (✍️ Firma ora) o scelta dall'archivio del cliente
+// (📁 Usa firma archiviata). Viene scritta su i.firmaClienteImg solo al salvataggio della
+// scheda — così l'utente può firmare e poi ANCORA cambiare idea prima di chiudere il form,
+// cosa impossibile col vecchio flusso che richiedeva un intervento già salvato.
+let _formFirmaCliente = null;
+
+function _aggiornaWidgetFirmaForm() {
+  const thumb = document.getElementById('formFirmaThumb');
+  if (!thumb) return;
+  const status = document.getElementById('formFirmaStatus');
+  const btnRimuovi = document.getElementById('btnRimuoviFirmaForm');
+  const sel = document.getElementById('formFirmaArchivioSel');
+
+  if (_formFirmaCliente?.dataUrl) {
+    thumb.src = _formFirmaCliente.dataUrl;
+    thumb.style.display = '';
+    const chi = _formFirmaCliente.nomeFirmatario ? ' — ' + _formFirmaCliente.nomeFirmatario : '';
+    const dt = _formFirmaCliente.data ? ' (' + new Date(_formFirmaCliente.data).toLocaleDateString('it-IT') + ')' : '';
+    status.textContent = 'Firma acquisita' + chi + dt;
+    btnRimuovi.style.display = '';
+  } else {
+    thumb.style.display = 'none';
+    status.textContent = 'Nessuna firma grafica associata.';
+    btnRimuovi.style.display = 'none';
+  }
+
+  const clienteId = parseInt(document.getElementById('i_cliente')?.value) || null;
+  const cliente = clienteId ? DB.clienti.find(c => c.id === clienteId) : null;
+  const firme = cliente?.firme || [];
+  if (sel) {
+    if (firme.length) {
+      sel.innerHTML = '<option value="">📁 Usa firma archiviata...</option>' +
+        firme.map((f, idx) => {
+          const chi = f.nomeFirmatario ? f.nomeFirmatario + ' - ' : '';
+          const dt = f.data ? new Date(f.data).toLocaleDateString('it-IT') : '—';
+          return `<option value="${idx}">${escHtml(chi + dt)}</option>`;
+        }).join('');
+      sel.style.display = '';
+      sel.value = '';
+    } else {
+      sel.style.display = 'none';
+    }
+  }
+}
+
+function _usaFirmaArchivioForm() {
+  const sel = document.getElementById('formFirmaArchivioSel');
+  const idx = parseInt(sel?.value);
+  if (isNaN(idx)) return;
+  const clienteId = parseInt(document.getElementById('i_cliente')?.value) || null;
+  const cliente = clienteId ? DB.clienti.find(c => c.id === clienteId) : null;
+  const f = cliente?.firme?.[idx];
+  if (!f) return;
+  _formFirmaCliente = { dataUrl: f.dataUrl, nomeFirmatario: f.nomeFirmatario || '', data: f.data || new Date().toISOString() };
+  _aggiornaWidgetFirmaForm();
+  mostraToast?.('📁 Firma archiviata selezionata', 'success');
+}
+
+function rimuoviFirmaFormIntervento() {
+  _formFirmaCliente = null;
+  _aggiornaWidgetFirmaForm();
+}
+
+function apriFirmaFormIntervento() {
+  const clienteId = parseInt(document.getElementById('i_cliente')?.value) || null;
+  if (!clienteId) { mostraToast('Seleziona prima un cliente'); return; }
+  _firmaGenericaModoForm = true;
+  _apriFirmaGenericaCore({
+    interventoId: null,
+    clienteId,
+    intro: 'Fai firmare il cliente per questo intervento.',
+    nomeDefault: document.getElementById('i_firma_cliente')?.value || ''
+  });
+}
+
 // Fornitori selezionabili come "Fornitore / contratto tariffe" su un intervento: solo quelli
 // con almeno una tariffa configurata (altrimenti non ci sarebbe nulla da valorizzare). Stessa
 // lista usata sia nel form intervento sia nel selettore fornitore per singolo strumento nella
@@ -6927,6 +7016,9 @@ function openInterventoModal(id = null) {
     document.getElementById('i_importo_extra').value = i.importoExtra||'';
     document.getElementById('i_pedaggio').value = i.pedaggio||'';
     buildPartsRows(i.ricambi||[]);
+    _formFirmaCliente = i.firmaClienteImg
+      ? { dataUrl: i.firmaClienteImg, nomeFirmatario: i.firmaClienteImgMeta?.nomeFirmatario || '', data: i.firmaClienteImgMeta?.data || '' }
+      : null;
   } else {
     const nextNum = 'WO-' + String(DB._nextId.intervento).padStart(4,'0');
     document.getElementById('i_numero').value = nextNum;
@@ -6960,8 +7052,10 @@ function openInterventoModal(id = null) {
     document.getElementById('i_importo_extra').value = '';
     document.getElementById('i_pedaggio').value = '';
     buildPartsRows([]);
+    _formFirmaCliente = null;
   }
   calcolaImportoIntervento();
+  _aggiornaWidgetFirmaForm();
   // Reset campo ricerca matricola
   const cs = document.getElementById('i_cerca_seriale');
   if (cs) { cs.value = ''; document.getElementById('i_cerca_seriale_results').style.display = 'none'; }
@@ -7143,7 +7237,7 @@ function aggiornaStrumentiCliente() {
   const cid = parseInt(document.getElementById('i_cliente').value);
   const cl = DB.clienti.find(c => c.id === cid);
   const dl = document.getElementById('dl_strumenti_cliente');
-  if (!cl) { dl.innerHTML = ''; return; }
+  if (!cl) { dl.innerHTML = ''; _aggiornaWidgetFirmaForm(); return; }
   const strumenti = cl.strumentiInstallati || migraStrumenti(cl.strumenti||'');
   dl.innerHTML = strumenti.map(s =>
     `<option value="${escRaw(s.modello)}" data-seriale="${escRaw(s.seriale)}">${escHtml(s.modello)}${s.seriale?' — S/N: '+escHtml(s.seriale):''}</option>`
@@ -7187,6 +7281,8 @@ function aggiornaStrumentiCliente() {
      document.getElementById('i_km').value = cl.km_reali;
      calcolaImportoIntervento();
   }
+
+  _aggiornaWidgetFirmaForm();
 }
 
 function aggiornaSerial() {
@@ -7650,6 +7746,13 @@ function _salvaInterventoImpl() {
     email: document.getElementById('i_email').value.trim(),
     esito: document.getElementById('i_esito').value,
     firmaCliente: document.getElementById('i_firma_cliente').value.trim(),
+    // Firma grafica: scritta qui (non al momento del disegno/scelta) così l'utente può
+    // ancora cambiare idea — disegnarla, sostituirla con una d'archivio o rimuoverla —
+    // finché non salva davvero la scheda. Vedi _formFirmaCliente e apriFirmaFormIntervento.
+    firmaClienteImg: _formFirmaCliente?.dataUrl || null,
+    firmaClienteImgMeta: _formFirmaCliente?.dataUrl
+      ? { data: _formFirmaCliente.data || new Date().toISOString(), tecnico: document.getElementById('i_tecnico').value.trim(), nomeFirmatario: _formFirmaCliente.nomeFirmatario || '' }
+      : null,
     ricambi: partsNew,
     fornitoreId: parseInt(document.getElementById('i_fornitore_id').value)||null,
     importoExtra: parseFloat(document.getElementById('i_importo_extra').value)||0,
@@ -7852,11 +7955,16 @@ let _firmaGenericaInterventoId = null;
 let _firmaGenericaClienteId = null;
 let _firmaGenericaHasStroke = false;
 let _firmaGenericaPunti = [];
+// true quando il pad è aperto dalla scheda di inserimento/modifica intervento (vedi
+// apriFirmaFormIntervento): in quel caso salvaFirmaGenerica() non scrive subito su un
+// intervento (potrebbe non esistere ancora), ma popola _formFirmaCliente in sospeso.
+let _firmaGenericaModoForm = false;
 
 function apriFirmaGenerica(interventoId) {
   const i = DB.interventi.find(x => x.id === interventoId);
   if (!i) return;
   const cliente = i.clienteId ? DB.clienti.find(c => c.id === i.clienteId) : null;
+  _firmaGenericaModoForm = false;
   _apriFirmaGenericaCore({
     interventoId,
     clienteId: i.clienteId || null,
@@ -7871,6 +7979,7 @@ function apriFirmaGenerica(interventoId) {
 function apriFirmaCliente(clienteId) {
   const cliente = DB.clienti.find(c => c.id === clienteId);
   if (!cliente) return;
+  _firmaGenericaModoForm = false;
   _apriFirmaGenericaCore({
     interventoId: null,
     clienteId,
@@ -8028,6 +8137,19 @@ function salvaFirmaGenerica() {
   const canvas = document.getElementById('firmaGenericaCanvas');
   const dataUrl = canvas.toDataURL('image/png');
   const nomeFirmatario = (document.getElementById('firmaGenericaNome')?.value || '').trim();
+
+  // Aperta dalla scheda di inserimento/modifica intervento (apriFirmaFormIntervento): la
+  // firma non va scritta subito su un intervento (potrebbe essere ancora una bozza non
+  // salvata), resta in sospeso e viene applicata da _salvaInterventoImpl() al salvataggio.
+  if (_firmaGenericaModoForm) {
+    _formFirmaCliente = { dataUrl, nomeFirmatario, data: new Date().toISOString() };
+    if (_firmaGenericaClienteId) _salvaFirmaGenericaNelCliente(_firmaGenericaClienteId, dataUrl, null, nomeFirmatario);
+    _firmaGenericaModoForm = false;
+    closeModal('modalFirmaGenerica');
+    mostraToast?.('✍️ Firma acquisita — verrà salvata con l\'intervento', 'success');
+    _aggiornaWidgetFirmaForm();
+    return;
+  }
 
   // Se la firma è stata aperta da un intervento, resta agganciata a quello (comportamento
   // invariato). Se invece è stata aperta direttamente dalla scheda cliente (nessun
