@@ -2286,8 +2286,8 @@
         <div class="section-sep">Dati trasporto (D.D.T.)</div>
         <div class="form-grid">
           <div class="form-group">
-            <label for="ddt_cliente_id">Destinatario da anagrafica</label>
-            <select id="ddt_cliente_id" onchange="aggiornaDestinatarioDaCliente()">
+            <label for="ddt_dest_anagrafica">Destinatario da anagrafica</label>
+            <select id="ddt_dest_anagrafica" onchange="aggiornaDestinatarioDDT()">
               <option value="">-- Nessuno / inserisci manualmente --</option>
             </select>
           </div>
@@ -2303,6 +2303,48 @@
             <label for="ddt_dest_piva">P.IVA / C.F. destinatario</label>
             <input type="text" id="ddt_dest_piva" placeholder="P.IVA o codice fiscale">
           </div>
+          <div class="form-group">
+            <label for="ddt_dest_referente">Persona di riferimento</label>
+            <input type="text" id="ddt_dest_referente" placeholder="Nome e cognome">
+          </div>
+          <div class="form-group">
+            <label for="ddt_dest_telefono">Telefono</label>
+            <input type="text" id="ddt_dest_telefono" placeholder="Telefono destinatario">
+          </div>
+        </div>
+
+        <label style="display:flex; align-items:center; gap:8px; font-size:0.85rem; cursor:pointer; margin:12px 0;">
+          <input type="checkbox" id="ddt_dest_diversa" onchange="aggiornaDestinazioneWrapDDT()" style="width:16px; height:16px; flex:0 0 16px; margin:0;">
+          La merce va consegnata in un luogo diverso dal destinatario
+        </label>
+        <div id="ddt_destinazione_wrap" style="display:none;">
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="ddt_destinazione_anagrafica">Destinazione da anagrafica</label>
+              <select id="ddt_destinazione_anagrafica" onchange="aggiornaDestinazioneDaAnagrafica()">
+                <option value="">-- Nessuno / inserisci manualmente --</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="ddt_destinazione_ragione">Nome / ragione sociale destinazione</label>
+              <input type="text" id="ddt_destinazione_ragione" placeholder="es. Filiale, cantiere, magazzino...">
+            </div>
+            <div class="form-group">
+              <label for="ddt_destinazione_indirizzo">Indirizzo destinazione</label>
+              <input type="text" id="ddt_destinazione_indirizzo" placeholder="Via, città, CAP, prov.">
+            </div>
+            <div class="form-group">
+              <label for="ddt_destinazione_referente">Persona di riferimento</label>
+              <input type="text" id="ddt_destinazione_referente" placeholder="Nome e cognome">
+            </div>
+            <div class="form-group">
+              <label for="ddt_destinazione_telefono">Telefono</label>
+              <input type="text" id="ddt_destinazione_telefono" placeholder="Telefono destinazione">
+            </div>
+          </div>
+        </div>
+
+        <div class="form-grid">
           <div class="form-group">
             <label for="ddt_causale">Causale del trasporto <span class="req">*</span></label>
             <select id="ddt_causale">
@@ -3528,7 +3570,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.9.0 • 05 set 2026';
+const APP_VERSION = '2.9.1 • 05 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -11794,16 +11836,25 @@ function openBollaModal(tipo, id = null) {
   const ddtWrap = document.getElementById('ddtFieldsWrap');
   if (ddtWrap) ddtWrap.style.display = isDDT ? 'block' : 'none';
   if (isDDT) {
-    const selCl = document.getElementById('ddt_cliente_id');
-    if (selCl) {
-      selCl.innerHTML = '<option value="">-- Nessuno / inserisci manualmente --</option>' +
-        DB.clienti.map(c => `<option value="${c.id}">${escHtml(c.ragione)}</option>`).join('');
-      selCl.value = b?.destinatarioClienteId || '';
-    }
+    _popolaSelectAnagraficaDDT(document.getElementById('ddt_dest_anagrafica'));
+    document.getElementById('ddt_dest_anagrafica').value = b?.destinatarioRif || '';
     const dest = b?.destinatario || {};
     document.getElementById('ddt_dest_ragione').value = dest.ragione || '';
     document.getElementById('ddt_dest_indirizzo').value = dest.indirizzo || '';
     document.getElementById('ddt_dest_piva').value = dest.piva || '';
+    document.getElementById('ddt_dest_referente').value = dest.referente || '';
+    document.getElementById('ddt_dest_telefono').value = dest.telefono || '';
+
+    _popolaSelectAnagraficaDDT(document.getElementById('ddt_destinazione_anagrafica'));
+    const destinazione = b?.destinazione || {};
+    document.getElementById('ddt_dest_diversa').checked = !!b?.destinazioneDiversa;
+    document.getElementById('ddt_destinazione_anagrafica').value = b?.destinazioneRif || '';
+    document.getElementById('ddt_destinazione_ragione').value = destinazione.ragione || '';
+    document.getElementById('ddt_destinazione_indirizzo').value = destinazione.indirizzo || '';
+    document.getElementById('ddt_destinazione_referente').value = destinazione.referente || '';
+    document.getElementById('ddt_destinazione_telefono').value = destinazione.telefono || '';
+    aggiornaDestinazioneWrapDDT();
+
     document.getElementById('ddt_causale').value = b?.causaleTrasporto || 'Vendita';
     document.getElementById('ddt_porto').value = b?.porto || 'Franco';
     document.getElementById('ddt_mezzo').value = b?.trasportoAMezzoDi || 'mittente';
@@ -11827,16 +11878,61 @@ function openBollaModal(tipo, id = null) {
   openModal('modalBolla');
 }
 
-// Precompila i campi destinatario del D.D.T. dai dati anagrafici del cliente scelto (restano
-// comunque modificabili: un DDT può avere un destinatario diverso dal cliente in scheda, es.
-// spedizione a un centro riparazioni del fornitore).
-function aggiornaDestinatarioDaCliente() {
-  const cid = parseInt(document.getElementById('ddt_cliente_id').value);
-  const cl = DB.clienti.find(c => c.id === cid);
-  if (!cl) return;
-  document.getElementById('ddt_dest_ragione').value = cl.ragione || '';
-  document.getElementById('ddt_dest_indirizzo').value = [cl.indirizzo, cl.citta, cl.cap, cl.prov].filter(Boolean).join(', ');
-  document.getElementById('ddt_dest_piva').value = cl.piva || '';
+// Popola un select con clienti E fornitori raggruppati (un D.D.T. può essere diretto a un
+// fornitore, es. reso/riparazione in garanzia, non solo a un cliente). Il valore codifica
+// tipo e id come "cliente:<id>" / "fornitore:<id>" per poterli distinguere alla lettura.
+function _popolaSelectAnagraficaDDT(sel) {
+  if (!sel) return;
+  const optClienti = DB.clienti.map(c => `<option value="cliente:${c.id}">${escHtml(c.ragione)}</option>`).join('');
+  const optFornitori = DB.fornitori.map(f => `<option value="fornitore:${f.id}">${escHtml(f.ragione)}</option>`).join('');
+  sel.innerHTML = '<option value="">-- Nessuno / inserisci manualmente --</option>' +
+    (optClienti ? `<optgroup label="Clienti">${optClienti}</optgroup>` : '') +
+    (optFornitori ? `<optgroup label="Fornitori">${optFornitori}</optgroup>` : '');
+}
+
+// Legge un valore "cliente:<id>" / "fornitore:<id>" e restituisce i dati anagrafici in forma
+// unificata (clienti e fornitori usano nomi di campo diversi per referente/telefono).
+function _datiAnagraficaDDT(valoreSelect) {
+  const [t, idStr] = String(valoreSelect||'').split(':');
+  const id = parseInt(idStr);
+  if (!id) return null;
+  if (t === 'cliente') {
+    const c = DB.clienti.find(x => x.id === id);
+    if (!c) return null;
+    return { ragione: c.ragione||'', indirizzo: [c.indirizzo,c.citta,c.cap,c.prov].filter(Boolean).join(', '), piva: c.piva||'', referente: c.referente||'', telefono: c.tel||'' };
+  }
+  if (t === 'fornitore') {
+    const f = DB.fornitori.find(x => x.id === id);
+    if (!f) return null;
+    return { ragione: f.ragione||'', indirizzo: [f.indirizzo,f.citta,f.cap,f.prov].filter(Boolean).join(', '), piva: f.piva||'', referente: f.contatto||'', telefono: f.tel||'' };
+  }
+  return null;
+}
+
+// Precompila i campi destinatario del D.D.T. dai dati anagrafici scelti (cliente o
+// fornitore). Restano comunque modificabili: un DDT può avere un destinatario diverso da
+// quello in anagrafica, es. spedizione a un centro riparazioni del fornitore.
+function aggiornaDestinatarioDDT() {
+  const dati = _datiAnagraficaDDT(document.getElementById('ddt_dest_anagrafica').value);
+  if (!dati) return;
+  document.getElementById('ddt_dest_ragione').value = dati.ragione;
+  document.getElementById('ddt_dest_indirizzo').value = dati.indirizzo;
+  document.getElementById('ddt_dest_piva').value = dati.piva;
+  document.getElementById('ddt_dest_referente').value = dati.referente;
+  document.getElementById('ddt_dest_telefono').value = dati.telefono;
+}
+
+function aggiornaDestinazioneDaAnagrafica() {
+  const dati = _datiAnagraficaDDT(document.getElementById('ddt_destinazione_anagrafica').value);
+  if (!dati) return;
+  document.getElementById('ddt_destinazione_ragione').value = dati.ragione;
+  document.getElementById('ddt_destinazione_indirizzo').value = dati.indirizzo;
+  document.getElementById('ddt_destinazione_referente').value = dati.referente;
+  document.getElementById('ddt_destinazione_telefono').value = dati.telefono;
+}
+
+function aggiornaDestinazioneWrapDDT() {
+  document.getElementById('ddt_destinazione_wrap').style.display = document.getElementById('ddt_dest_diversa').checked ? '' : 'none';
 }
 
 function aggiornaCampiVettoreDDT() {
@@ -11974,13 +12070,24 @@ function _salvaBollaImpl() {
     const destRagione = document.getElementById('ddt_dest_ragione').value.trim();
     if (!destRagione) { mostraToast('Inserisci la ragione sociale del destinatario'); return; }
     const mezzo = document.getElementById('ddt_mezzo').value;
+    const destinazioneDiversa = document.getElementById('ddt_dest_diversa').checked;
     datiDDT = {
-      destinatarioClienteId: parseInt(document.getElementById('ddt_cliente_id').value) || null,
+      destinatarioRif: document.getElementById('ddt_dest_anagrafica').value || null,
       destinatario: {
         ragione: destRagione,
         indirizzo: document.getElementById('ddt_dest_indirizzo').value.trim(),
-        piva: document.getElementById('ddt_dest_piva').value.trim()
+        piva: document.getElementById('ddt_dest_piva').value.trim(),
+        referente: document.getElementById('ddt_dest_referente').value.trim(),
+        telefono: document.getElementById('ddt_dest_telefono').value.trim()
       },
+      destinazioneDiversa,
+      destinazioneRif: destinazioneDiversa ? (document.getElementById('ddt_destinazione_anagrafica').value || null) : null,
+      destinazione: destinazioneDiversa ? {
+        ragione: document.getElementById('ddt_destinazione_ragione').value.trim(),
+        indirizzo: document.getElementById('ddt_destinazione_indirizzo').value.trim(),
+        referente: document.getElementById('ddt_destinazione_referente').value.trim(),
+        telefono: document.getElementById('ddt_destinazione_telefono').value.trim()
+      } : null,
       causaleTrasporto: document.getElementById('ddt_causale').value,
       porto: document.getElementById('ddt_porto').value,
       trasportoAMezzoDi: mezzo,
@@ -12189,11 +12296,23 @@ function _renderAnteprimaDDTIframe() {
     </div>
   </div>
 
-  <div class="box">
-    <div class="box-title">Destinatario</div>
-    <div><strong>${esc(b.destinatario?.ragione || '—')}</strong></div>
-    <div>${esc(b.destinatario?.indirizzo || '')}</div>
-    <div>${b.destinatario?.piva ? 'P.IVA/C.F. ' + esc(b.destinatario.piva) : ''}</div>
+  <div class="${b.destinazioneDiversa ? 'grid2' : ''}">
+    <div class="box">
+      <div class="box-title">Destinatario</div>
+      <div><strong>${esc(b.destinatario?.ragione || '—')}</strong></div>
+      <div>${esc(b.destinatario?.indirizzo || '')}</div>
+      <div>${b.destinatario?.piva ? 'P.IVA/C.F. ' + esc(b.destinatario.piva) : ''}</div>
+      ${b.destinatario?.referente ? `<div>Rif.: ${esc(b.destinatario.referente)}</div>` : ''}
+      ${b.destinatario?.telefono ? `<div>Tel.: ${esc(b.destinatario.telefono)}</div>` : ''}
+    </div>
+    ${b.destinazioneDiversa ? `
+    <div class="box">
+      <div class="box-title">Destinazione (luogo di consegna)</div>
+      <div><strong>${esc(b.destinazione?.ragione || '—')}</strong></div>
+      <div>${esc(b.destinazione?.indirizzo || '')}</div>
+      ${b.destinazione?.referente ? `<div>Rif.: ${esc(b.destinazione.referente)}</div>` : ''}
+      ${b.destinazione?.telefono ? `<div>Tel.: ${esc(b.destinazione.telefono)}</div>` : ''}
+    </div>` : ''}
   </div>
 
   <table>
@@ -12977,6 +13096,12 @@ function viewDetailBolla(id) {
       <div><strong>Destinatario:</strong> ${escHtml(b.destinatario?.ragione || '—')}</div>
       <div><strong>P.IVA/C.F. destinatario:</strong> ${escHtml(b.destinatario?.piva || '—')}</div>
       <div style="grid-column: span 2;"><strong>Indirizzo destinatario:</strong> ${escHtml(b.destinatario?.indirizzo || '—')}</div>
+      <div><strong>Rif. destinatario:</strong> ${escHtml(b.destinatario?.referente || '—')}</div>
+      <div><strong>Tel. destinatario:</strong> ${escHtml(b.destinatario?.telefono || '—')}</div>
+      ${b.destinazioneDiversa ? `
+      <div style="grid-column: span 2;"><strong>Destinazione (luogo di consegna):</strong> ${escHtml(b.destinazione?.ragione || '—')} — ${escHtml(b.destinazione?.indirizzo || '—')}</div>
+      <div><strong>Rif. destinazione:</strong> ${escHtml(b.destinazione?.referente || '—')}</div>
+      <div><strong>Tel. destinazione:</strong> ${escHtml(b.destinazione?.telefono || '—')}</div>` : ''}
       <div><strong>Causale trasporto:</strong> ${escHtml(b.causaleTrasporto || '—')}</div>
       <div><strong>Porto:</strong> ${escHtml(b.porto || '—')}</div>
       <div><strong>Trasporto a mezzo di:</strong> ${escHtml({mittente:'Mittente',destinatario:'Destinatario',vettore:'Vettore'}[b.trasportoAMezzoDi] || '—')}${b.vettore?.ragione ? ' — ' + escHtml(b.vettore.ragione) : ''}</div>
