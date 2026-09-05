@@ -3570,7 +3570,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.9.1 • 05 set 2026';
+const APP_VERSION = '2.9.2 • 05 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -6023,6 +6023,16 @@ function _renderAnteprimaVerbaleIframe() {
     [data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); }
     [data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
     [data-theme="dark"] * { scrollbar-color: rgba(255, 255, 255, 0.12) transparent; }
+
+    /* BUG FIX: senza @page{margin:0} il browser riserva il proprio margine di stampa e vi
+       disegna dentro l'intestazione/piè di pagina predefiniti (titolo+data in alto, URL+
+       numero pagina in basso) — non richiesti su un documento aziendale. Azzerando il
+       margine di pagina quello spazio sparisce e il browser non ha più dove disegnarli; il
+       padding sul body qui sotto (attivo solo in stampa) restituisce lo stesso margine
+       visivo attorno al contenuto.
+    */
+    @page { margin: 0; }
+    @media print { body { padding: 12mm 14mm 16mm; } }
 
   </style></head><body>
 ${headerHtml}
@@ -12281,7 +12291,12 @@ function _renderAnteprimaDDTIframe() {
   .firma-box { flex:1; text-align:center; font-size:10px; color:#555; }
   .firma-linea { border-top:1px solid #333; margin-top:36px; padding-top:4px; }
   .note-box { font-size:11px; margin-bottom:14px; }
-  @media print { body { padding: 8mm; } }
+  /* BUG FIX: senza @page{margin:0} il browser riserva il proprio margine di stampa e vi
+     disegna dentro l'intestazione/piè di pagina predefiniti (titolo+data in alto, URL+numero
+     pagina in basso) — non richiesti su un D.D.T. Il padding sul body in stampa restituisce
+     lo stesso margine visivo attorno al contenuto. */
+  @page { margin: 0; }
+  @media print { body { padding: 10mm 12mm; } }
 </style></head><body>
 
   <div class="header">
@@ -13399,9 +13414,14 @@ function _apriPDF(titolo, sottotitolo, intestazioni, righe, note) {
     .note{margin-top:14px;font-size:9px;color:#888;}
     .tot{font-weight:700;background:#f0f0f8!important;}
     .footer-copy{position:fixed;bottom:10mm;left:0;right:0;text-align:center;font-size:8px;color:#aaa;}
+    /* BUG FIX: senza @page{margin:0} il browser riserva il proprio margine di stampa e vi
+       disegna dentro l'intestazione/piè di pagina predefiniti (titolo+data in alto, URL+
+       numero pagina in basso) — non richiesti su un documento aziendale. Il padding sul body
+       (ora spostato qui, azzerato il margine di pagina) restituisce lo stesso spazio visivo
+       che prima forniva @page. */
     @media print{
-      @page{margin:14mm 12mm;}
-      body{padding:0 0 10mm 0;}
+      @page{margin:0;}
+      body{padding:14mm 12mm 20mm 12mm;}
       thead{display:table-header-group;}
       .footer-copy{position:fixed;bottom:5mm;}
     }`;
@@ -14262,6 +14282,15 @@ function _apriPDF(titolo, sottotitolo, intestazioni, righe, note) {
     [data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); }
     [data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
     [data-theme="dark"] * { scrollbar-color: rgba(255, 255, 255, 0.12) transparent; }
+
+    /* BUG FIX: senza @page{margin:0} il browser riserva il proprio margine di stampa e vi
+       disegna dentro l'intestazione/piè di pagina predefiniti (titolo+data in alto, URL+
+       numero pagina in basso) — non richiesti su un documento aziendale. Il padding sul body
+       in stampa restituisce lo stesso margine visivo attorno al contenuto. (Nota: la
+       variabile "css" più sopra con lo stesso fix non viene mai inserita nell'HTML finale —
+       questo è il blocco di stile realmente incorporato in questo template.) */
+    @page { margin: 0; }
+    @media print { body { padding: 14mm 12mm 20mm; } }
 
   </style></head><body>
     ${headerHtml}
