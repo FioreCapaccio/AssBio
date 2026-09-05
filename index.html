@@ -3396,7 +3396,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.8.3 • 05 set 2026';
+const APP_VERSION = '2.8.6 • 05 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -3951,8 +3951,8 @@ const DB = {
     },
     _migrate(fromVersion) {
         if (fromVersion < 2) {
-            this.ricambi.forEach(r => { if (!r.createdAt) r.createdAt = new Date().toISOString().split('T')[0]; });
-            this.clienti.forEach(c => { if (!c.createdAt) c.createdAt = new Date().toISOString().split('T')[0]; });
+            this.ricambi.forEach(r => { if (!r.createdAt) r.createdAt = today(); });
+            this.clienti.forEach(c => { if (!c.createdAt) c.createdAt = today(); });
         }
         if (fromVersion < 3) {
             this.interventi.forEach(i => { if (i.kmReali === undefined) i.kmReali = i.km || 0; if (i.pedaggio === undefined) i.pedaggio = 0; });
@@ -6154,6 +6154,45 @@ const SUPABASE = {
     return Promise.all(tables.map(tbl => this._downloadTable(tbl, userId).then(data => ({ tbl, data }))));
   },
 
+  // Upload di un singolo archivio verso Supabase: upsert dei record presenti in locale +
+  // cancellazione di quelli rimasti sul cloud ma non più in locale (vedi commento originale
+  // più sotto sui record "fantasma"). Estratta da syncUp() per essere richiamabile anche
+  // fuori dal ciclo principale sulle tabelle "storiche" — serve alla sincronizzazione degli
+  // appuntamenti, isolata in un proprio try/catch perché la tabella può non esistere ancora
+  // sul progetto Supabase dell'utente. Lascia propagare l'errore al chiamante (comportamento
+  // invariato per le tabelle storiche, che continuano a interrompere syncUp() in caso di
+  // errore reale).
+  async _syncTableUp(table, records, userId, nowLocal) {
+    const sb = this.getClient();
+    const localIds = new Set((records || []).map(r => r.id));
+
+    if (records && records.length) {
+      const rows = records.map(r => ({ user_id: userId, id: r.id, data: r, updated_at: nowLocal }));
+      for (let i = 0; i < rows.length; i += 100) {
+        const batch = rows.slice(i, i + 100);
+        const { error } = await sb.from(table).upsert(batch, { onConflict: 'user_id,id', ignoreDuplicates: false });
+        if (error) throw new Error(`Errore upsert ${table}: ${error.message}`);
+      }
+      console.log(`[Supabase] Uploaded ${rows.length} records to ${table}`);
+    }
+
+    // BUG FIX: l'upsert da solo non cancella mai nulla — un record eliminato in locale
+    // restava per sempre nel cloud e tornava indietro a ogni successivo download (i
+    // record "fantasma" segnalati dall'utente). Qui si rimuovono dal cloud gli id che
+    // esistevano lì ma non sono più presenti in locale.
+    const { data: cloudIdRows, error: idsErr } = await sb.from(table).select('id').eq('user_id', userId);
+    if (idsErr) {
+      console.warn(`[Supabase] Errore lettura id cloud per ${table}:`, idsErr.message);
+    } else if (cloudIdRows && cloudIdRows.length) {
+      const idsToDelete = cloudIdRows.map(r => r.id).filter(id => !localIds.has(id));
+      if (idsToDelete.length) {
+        const { error: delErr } = await sb.from(table).delete().eq('user_id', userId).in('id', idsToDelete);
+        if (delErr) console.warn(`[Supabase] Errore cancellazione ${table}:`, delErr.message);
+        else console.log(`[Supabase] Rimossi ${idsToDelete.length} record cancellati da ${table}`);
+      }
+    }
+  },
+
   async syncUp() {
     if (!this.isLoggedIn) return;
     const userId = this.currentUserId;
@@ -6173,33 +6212,20 @@ const SUPABASE = {
       const entities = { clienti: DB.clienti, interventi: DB.interventi, ricambi: DB.ricambi, fornitori: DB.fornitori, bolle: DB.bolle, ordini: DB.ordini, inventari: DB.inventari };
 
       for (const [table, records] of Object.entries(entities)) {
-        const localIds = new Set((records || []).map(r => r.id));
+        await this._syncTableUp(table, records, userId, nowLocal);
+      }
 
-        if (records && records.length) {
-          const rows = records.map(r => ({ user_id: userId, id: r.id, data: r, updated_at: nowLocal }));
-          for (let i = 0; i < rows.length; i += 100) {
-            const batch = rows.slice(i, i + 100);
-            const { error } = await sb.from(table).upsert(batch, { onConflict: 'user_id,id', ignoreDuplicates: false });
-            if (error) throw new Error(`Errore upsert ${table}: ${error.message}`);
-          }
-          console.log(`[Supabase] Uploaded ${rows.length} records to ${table}`);
-        }
-
-        // BUG FIX: l'upsert da solo non cancella mai nulla — un record eliminato in locale
-        // restava per sempre nel cloud e tornava indietro a ogni successivo download (i
-        // record "fantasma" segnalati dall'utente). Qui si rimuovono dal cloud gli id che
-        // esistevano lì ma non sono più presenti in locale.
-        const { data: cloudIdRows, error: idsErr } = await sb.from(table).select('id').eq('user_id', userId);
-        if (idsErr) {
-          console.warn(`[Supabase] Errore lettura id cloud per ${table}:`, idsErr.message);
-        } else if (cloudIdRows && cloudIdRows.length) {
-          const idsToDelete = cloudIdRows.map(r => r.id).filter(id => !localIds.has(id));
-          if (idsToDelete.length) {
-            const { error: delErr } = await sb.from(table).delete().eq('user_id', userId).in('id', idsToDelete);
-            if (delErr) console.warn(`[Supabase] Errore cancellazione ${table}:`, delErr.message);
-            else console.log(`[Supabase] Rimossi ${idsToDelete.length} record cancellati da ${table}`);
-          }
-        }
+      // Appuntamenti: tabella introdotta dopo le altre, va creata una tantum su Supabase
+      // (SQL nelle note di rilascio / chiesto a Claude). Sincronizzata FUORI dal ciclo
+      // sopra e con un try/catch dedicato: se la tabella non esiste ancora sul progetto
+      // dell'utente, l'upsert fallisce con un errore Postgres (42P01) — senza questo
+      // isolamento, il throw interromperebbe l'intero syncUp() e nessun altro archivio
+      // (clienti, interventi, ...) verrebbe più sincronizzato finché la tabella non esiste.
+      try {
+        await this._syncTableUp('appuntamenti', DB.appuntamenti, userId, nowLocal);
+      } catch (e) {
+        console.warn('[Supabase] Sync appuntamenti non riuscito (tabella non ancora creata su Supabase?):', e.message);
+        mostraToast('⚠️ Appuntamenti non sincronizzati: la tabella "appuntamenti" non esiste ancora su Supabase.', 'warning');
       }
 
       // NOTA: last_update torna a essere scritto dal client (nowLocal) invece che affidato
@@ -6263,7 +6289,10 @@ const SUPABASE = {
         if (!confirm(`Supabase: Trovati dati più recenti (del ${new Date(cloudCfg.last_update).toLocaleString()}). Caricarli?\n\n⚠️ I PDF Merck allegati localmente non verranno sovrascritti.`)) return false;
       }
 
-      const tableNames = ['clienti', 'interventi', 'ricambi', 'fornitori', 'bolle', 'ordini', 'inventari'];
+      // 'appuntamenti' incluso qui senza bisogno di isolamento: _downloadTable() già
+      // restituisce null (mai un throw) se la tabella manca o la query fallisce, e il ciclo
+      // sotto salta con "if (!data) continue" — nessun rischio di bloccare le altre tabelle.
+      const tableNames = ['clienti', 'interventi', 'ricambi', 'fornitori', 'bolle', 'ordini', 'inventari', 'appuntamenti'];
       const results = await this._downloadAll(tableNames, userId);
       let okCount = 0;
 
@@ -6589,7 +6618,15 @@ const trunc = (s, n = 20) => {
   return str.length > n ? str.substring(0, n) + '...' : str;
 };
 
-function today() { return new Date().toISOString().split('T')[0]; }
+// BUG FIX: toISOString() converte l'istante corrente in UTC prima di estrarre la data. In un
+// fuso avanti rispetto a UTC (es. Europe/Rome, UTC+1/+2), nella finestra tra mezzanotte
+// locale e le 01:00-02:00 questo faceva tornare la data di IERI invece di oggi (l'equivalente
+// UTC di quell'orario locale ricade ancora nel giorno prima). Si resta sempre in orario
+// locale, senza mai passare da UTC.
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
 
 function statoBadge(s) {
   const map = {
@@ -8630,7 +8667,13 @@ function renderCalendarioAppuntamenti() {
     } else {
       dataCella = new Date(_calAppAnno, _calAppMese, numGiorno);
     }
-    const dataStr = dataCella.toISOString().split('T')[0];
+    // BUG FIX: toISOString() converte in UTC — con un fuso avanti rispetto a UTC (es. Italia,
+    // UTC+1/+2) la mezzanotte locale del giorno mostrato in cella "scala" al giorno UTC
+    // precedente, disallineando di un giorno la data usata per raggruppare gli appuntamenti
+    // e per creare un nuovo appuntamento cliccando sulla cella (il riquadro mostrava un
+    // numero ma agiva sul giorno prima). Si costruisce la stringa direttamente dai valori
+    // locali (getFullYear/getMonth/getDate), senza mai passare da UTC.
+    const dataStr = `${dataCella.getFullYear()}-${String(dataCella.getMonth()+1).padStart(2,'0')}-${String(dataCella.getDate()).padStart(2,'0')}`;
     const eventiGiorno = perGiorno[dataStr] || [];
     const isOggi = dataStr === oggiStr;
 
