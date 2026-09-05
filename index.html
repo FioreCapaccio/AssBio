@@ -162,6 +162,26 @@
     .hscroll-arrow-left { left: 0; }
     .hscroll-arrow.show { opacity: 1; pointer-events: auto; }
     .hscroll-arrow:hover { color: var(--accent); }
+    /* ===== CALENDARIO APPUNTAMENTI ===== */
+    .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+    .cal-weekday { text-align: center; font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; padding: 4px 0; }
+    .cal-day {
+      min-height: 92px; border: 1px solid var(--border); border-radius: 8px; padding: 6px;
+      background: var(--surface); cursor: pointer; display: flex; flex-direction: column; gap: 4px;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .cal-day:hover { background: var(--surface2); border-color: var(--accent); }
+    .cal-day.cal-day-out { opacity: 0.4; }
+    .cal-day.cal-day-today { border-color: var(--accent); border-width: 2px; }
+    .cal-day-num { font-size: 0.78rem; font-weight: 700; }
+    .cal-day-events { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+    .cal-event { font-size: 0.66rem; padding: 2px 5px; border-radius: 4px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+    .cal-event:hover { filter: brightness(1.12); }
+    .cal-more { font-size: 0.64rem; color: var(--text-muted); padding-left: 2px; }
+    @media (max-width: 760px) {
+      .cal-day { min-height: 60px; padding: 4px; }
+      .cal-event { font-size: 0.6rem; }
+    }
     nav button {
       background: none;
       border: none;
@@ -879,6 +899,7 @@
 <nav class="glass">
   <button class="active" onclick="showSection('dashboard')">📊 Dashboard</button>
   <button onclick="showSection('clienti')">👤 Clienti</button>
+  <button onclick="showSection('appuntamenti')">📅 Appuntamenti</button>
   <button onclick="showSection('interventi')">🔧 Interventi</button>
   <button onclick="showSection('ricambi')">📦 Ricambi</button>
   <button onclick="showSection('fornitori')">🏭 Fornitori</button>
@@ -912,6 +933,14 @@
           <div class="stat-label">Clienti attivi</div>
         </div>
         <div class="stat-icon blue">👤</div>
+      </div>
+
+      <div class="stat-card" style="cursor:pointer;" title="Vai agli appuntamenti in programma" onclick="showSection('appuntamenti')">
+        <div class="stat-info">
+          <div class="stat-val" id="stat-appuntamenti">0</div>
+          <div class="stat-label">Appuntamenti in programma</div>
+        </div>
+        <div class="stat-icon purple">📅</div>
       </div>
 
       <div class="stat-card" style="cursor:pointer;" title="Vedi interventi aperti" onclick="showSection('interventi');filtraInterventiByCond('aperti')">
@@ -966,6 +995,10 @@
     <div id="dash-alerts"></div>
 
     <div class="dash-grid">
+      <div class="dash-card">
+        <h4>Prossimi appuntamenti</h4>
+        <div id="dash-appuntamenti" class="list-recent"></div>
+      </div>
       <div class="dash-card">
         <h4>Ultimi interventi</h4>
         <div id="dash-recenti" class="list-recent"></div>
@@ -1035,6 +1068,92 @@
             <tr><td colspan="8"><div class="empty-state"><div class="icon">👤</div><p>Nessun cliente registrato</p></div></td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== APPUNTAMENTI ===== -->
+  <div id="section-appuntamenti" class="section">
+    <div class="page-header">
+      <div>
+        <h2>Appuntamenti</h2>
+        <p>Pianificazione delle visite tecniche presso i clienti</p>
+      </div>
+      <button class="btn btn-primary" onclick="openAppuntamentoModal()">+ Nuovo appuntamento</button>
+    </div>
+
+    <div class="toolbar" style="padding: 12px 16px;">
+      <div class="toolbar-left" style="flex: 0 0 auto; display:flex; gap:8px; align-items:center;">
+        <div style="display:flex; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+          <button class="btn btn-primary btn-sm" id="btnAppVistaLista" onclick="cambiaVistaAppuntamenti('lista')" style="border-radius:0;">📋 Lista</button>
+          <button class="btn btn-ghost btn-sm" id="btnAppVistaCalendario" onclick="cambiaVistaAppuntamenti('calendario')" style="border-radius:0;">📅 Calendario</button>
+        </div>
+        <input type="text" class="search-input" placeholder="🔍 Cerca appuntamento..." id="searchAppuntamenti" oninput="renderAppuntamenti()" style="width: 220px; max-width: 100%;">
+      </div>
+    </div>
+
+    <!-- ===== VISTA LISTA ===== -->
+    <div id="appViewLista">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 12px 0; padding: 10px; background: var(--surface); border-radius: 8px; border: 1px solid var(--border);">
+        <span style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">Filtri:</span>
+        <select class="filter-select" id="filterStatoAppuntamento" onchange="renderAppuntamenti()">
+          <option value="">Tutti gli stati</option>
+          <option value="Programmato">Programmato</option>
+          <option value="Confermato">Confermato</option>
+          <option value="Completato">Completato</option>
+          <option value="Annullato">Annullato</option>
+        </select>
+        <select class="filter-select" id="filterTecnicoAppuntamento" onchange="renderAppuntamenti()">
+          <option value="">Tutti i tecnici</option>
+        </select>
+        <label style="display:flex; align-items:center; gap:6px; font-size:0.82rem; color:var(--text-muted); cursor:pointer;">
+          <input type="checkbox" id="filterSoloFuturiAppuntamento" checked onchange="renderAppuntamenti()"> Solo da oggi in poi
+        </label>
+        <span id="appuntamenti-count" style="font-size:0.83rem;color:var(--text-muted);margin-left:auto;"></span>
+      </div>
+
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Data / Ora</th>
+                <th>Cliente</th>
+                <th>Strumenti</th>
+                <th>Guasto / Motivo</th>
+                <th>Tecnico assegnato</th>
+                <th>Stato</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tbAppuntamenti">
+              <tr><td colspan="7"><div class="empty-state"><div class="icon">📅</div><p>Nessun appuntamento in programma</p></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== VISTA CALENDARIO ===== -->
+    <div id="appViewCalendario" style="display:none;">
+      <div class="card" style="padding:16px;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" onclick="cambiaMeseCalendarioAppuntamenti(-1)">‹ Mese prec.</button>
+          <button class="btn btn-ghost btn-sm" onclick="vaiOggiCalendarioAppuntamenti()">Oggi</button>
+          <button class="btn btn-ghost btn-sm" onclick="cambiaMeseCalendarioAppuntamenti(1)">Mese succ. ›</button>
+          <h3 id="calAppTitolo" style="margin:0 0 0 8px; text-transform:capitalize;"></h3>
+          <span style="font-size:0.8rem; color:var(--text-muted); margin-left:auto;">Clicca su un giorno per creare un appuntamento</span>
+        </div>
+        <div class="cal-grid" style="margin-bottom:6px;">
+          <div class="cal-weekday">Lun</div>
+          <div class="cal-weekday">Mar</div>
+          <div class="cal-weekday">Mer</div>
+          <div class="cal-weekday">Gio</div>
+          <div class="cal-weekday">Ven</div>
+          <div class="cal-weekday">Sab</div>
+          <div class="cal-weekday">Dom</div>
+        </div>
+        <div class="cal-grid" id="calAppGrid"></div>
       </div>
     </div>
   </div>
@@ -1813,7 +1932,7 @@
     <div class="modal-header">
       <h3 id="modalInterventoTitolo">Nuovo intervento</h3>
       <div id="modalInterventoActions" style="margin-left:auto; margin-right:12px; display:flex; gap:6px;"></div>
-      <button class="modal-close" onclick="closeModal('modalIntervento')">✕</button>
+      <button class="modal-close" onclick="_codaConversioneAppuntamento=null; closeModal('modalIntervento')">✕</button>
     </div>
     <div class="modal-body">
       <div class="form-grid col3">
@@ -2008,8 +2127,84 @@
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-ghost" onclick="closeModal('modalIntervento')">Annulla</button>
+      <button class="btn btn-ghost" onclick="_codaConversioneAppuntamento=null; closeModal('modalIntervento')">Annulla</button>
       <button class="btn btn-primary" onclick="salvaIntervento()">Salva intervento</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL APPUNTAMENTO -->
+<div class="modal-overlay" id="modalAppuntamento">
+  <div class="modal" style="max-width:680px;">
+    <div class="modal-header">
+      <h3 id="modalAppuntamentoTitolo">Nuovo appuntamento</h3>
+      <div id="modalAppuntamentoActions" style="display:flex; gap:8px; margin-left:auto; margin-right:12px;"></div>
+      <button class="modal-close" onclick="closeModal('modalAppuntamento')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="app_cliente">Cliente <span class="req">*</span></label>
+          <select id="app_cliente" onchange="aggiornaStrumentiClienteAppuntamento()"></select>
+        </div>
+        <div class="form-group">
+          <label for="app_tecnico">Tecnico assegnato</label>
+          <select id="app_tecnico"><option value="">-- Nessuno --</option></select>
+        </div>
+        <div class="form-group">
+          <label for="app_data">Data <span class="req">*</span></label>
+          <input type="date" id="app_data">
+        </div>
+        <div class="form-group">
+          <label for="app_ora_inizio">Ora inizio</label>
+          <input type="time" id="app_ora_inizio">
+        </div>
+        <div class="form-group">
+          <label for="app_ora_fine">Ora fine</label>
+          <input type="time" id="app_ora_fine">
+        </div>
+        <div class="form-group">
+          <label for="app_stato">Stato</label>
+          <select id="app_stato">
+            <option value="Programmato">Programmato</option>
+            <option value="Confermato">Confermato</option>
+            <option value="Completato">Completato</option>
+            <option value="Annullato">Annullato</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Strumenti coinvolti</label>
+        <p style="font-size:0.76rem; color:var(--text-muted); margin:-2px 0 4px;">Alla conversione in intervento, ogni strumento spuntato genera un intervento separato con il proprio numero di chiamata.</p>
+        <div style="display:flex; gap:8px; padding:0 2px; font-size:0.68rem; color:var(--text-muted); font-weight:700; text-transform:uppercase;">
+          <span style="flex:1;">Strumento</span>
+          <span style="flex:0 0 110px;">N° chiamata</span>
+          <span style="flex:0 0 30px;"></span>
+        </div>
+        <div id="app_strumenti_lista" style="display:flex; flex-direction:column; gap:2px; max-height:190px; overflow-y:auto; padding:8px 10px; background:var(--surface2); border-radius:8px;">
+          <span style="font-size:0.8rem; color:var(--text-muted);">Seleziona prima un cliente</span>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <input type="text" id="app_strumento_extra" placeholder="Strumento non in elenco...">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="aggiungiStrumentoExtraAppuntamento()" style="white-space:nowrap;">+ Aggiungi</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="app_problema">Guasto / motivo della visita</label>
+        <textarea id="app_problema" rows="3" placeholder="Descrizione del guasto segnalato o motivo dell'appuntamento"></textarea>
+      </div>
+      <div class="form-group">
+        <label for="app_note">Note</label>
+        <textarea id="app_note" rows="2" placeholder="Note aggiuntive (accessi, referente in loco, orari da rispettare...)"></textarea>
+      </div>
+      <div id="app_esito_wrap" style="display:none; padding:10px 12px; background:var(--surface2); border-radius:8px; font-size:0.85rem;">
+        ✅ Tutti gli strumenti di questo appuntamento sono stati convertiti in intervento.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modalAppuntamento')">Annulla</button>
+      <button class="btn btn-success" id="btnConvertiAppuntamento" onclick="convertiAppuntamentoInIntervento()" style="display:none;">➡️ Crea intervento</button>
+      <button class="btn btn-primary" onclick="salvaAppuntamento()">Salva appuntamento</button>
     </div>
   </div>
 </div>
@@ -3046,6 +3241,9 @@
             <input type="checkbox" id="rs_bolle" checked> 📄 Bolle/Ordini (<span id="rs_cnt_bolle">0</span>)
           </label>
           <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+            <input type="checkbox" id="rs_appuntamenti" checked> 📅 Appuntamenti (<span id="rs_cnt_appuntamenti">0</span>)
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
             <input type="checkbox" id="rs_settings" checked> ⚙️ Impostazioni
           </label>
         </div>
@@ -3198,7 +3396,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.7.18 • 04 set 2026';
+const APP_VERSION = '2.8.3 • 05 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -3311,6 +3509,17 @@ try {
         allegatiPdf: 'interventionId',
         inventari: '++id'
     });
+    dexieDB.version(4).stores({
+        clienti: '++id',
+        interventi: '++id, data, clienteId',
+        ricambi: '++id, codice',
+        fornitori: '++id',
+        bolle: '++id',
+        ordini: '++id',
+        allegatiPdf: 'interventionId',
+        inventari: '++id',
+        appuntamenti: '++id, data, clienteId'
+    });
   } else {
     console.warn('Dexie non disponibile — solo localStorage');
   }
@@ -3328,8 +3537,9 @@ const DB = {
     bolle: [],
     ordini: [],
     inventari: [],
+    appuntamenti: [],
     opzioni: {},
-    _nextId: { cliente: 1, intervento: 1, ricambio: 1, lotto: 1, fornitore: 1, bolla: 1, ordine: 1, inventario: 1 },
+    _nextId: { cliente: 1, intervento: 1, ricambio: 1, lotto: 1, fornitore: 1, bolla: 1, ordine: 1, inventario: 1, appuntamento: 1 },
 
     // GUARDIA ANTI-PERDITA DATI: resta false finché _loadFromDexie() non ha terminato di
     // leggere la sorgente primaria (IndexedDB) in memoria. Finché è false NESSUNA scrittura
@@ -3351,10 +3561,12 @@ const DB = {
         try { this.bolle = JSON.parse(localStorage.getItem('ivd_bolle')) || []; } catch(e) { this.bolle = []; }
         try { this.ordini = JSON.parse(localStorage.getItem('ivd_ordini')) || []; } catch(e) { this.ordini = []; }
         try { this.inventari = JSON.parse(localStorage.getItem('ivd_inventari')) || []; } catch(e) { this.inventari = []; }
+        try { this.appuntamenti = JSON.parse(localStorage.getItem('ivd_appuntamenti')) || []; } catch(e) { this.appuntamenti = []; }
 
         if (!Array.isArray(this.bolle)) this.bolle = [];
         if (!Array.isArray(this.inventari)) this.inventari = [];
         if (!Array.isArray(this.ordini)) this.ordini = [];
+        if (!Array.isArray(this.appuntamenti)) this.appuntamenti = [];
 
         // Gestione ID e Opzioni
         try {
@@ -3366,6 +3578,7 @@ const DB = {
         if (!this._nextId.bolla) this._nextId.bolla = 1;
         if (!this._nextId.ordine) this._nextId.ordine = 1;
         if (!this._nextId.inventario) this._nextId.inventario = 1;
+        if (!this._nextId.appuntamento) this._nextId.appuntamento = 1;
 
         try {
             const saved = JSON.parse(localStorage.getItem('ivd_opzioni')) || {};
@@ -3400,14 +3613,15 @@ const DB = {
             const count = await dexieDB.clienti.count();
             if (count > 0) {
                 console.log("🔄 Caricamento dati completi da IndexedDB (Dexie)...");
-                const [cli, inte, ric, forn, bol, ord, inv] = await Promise.all([
+                const [cli, inte, ric, forn, bol, ord, inv, app] = await Promise.all([
                     dexieDB.clienti.toArray(),
                     dexieDB.interventi.toArray(),
                     dexieDB.ricambi.toArray(),
                     dexieDB.fornitori.toArray(),
                     dexieDB.bolle.toArray(),
                     dexieDB.ordini.toArray(),
-                    dexieDB.inventari.toArray()
+                    dexieDB.inventari.toArray(),
+                    dexieDB.appuntamenti.toArray()
                 ]);
 
                 this.clienti = cli;
@@ -3417,6 +3631,7 @@ const DB = {
                 this.bolle = bol;
                 this.ordini = ord;
                 this.inventari = inv;
+                this.appuntamenti = app;
 
                 // _checkVersion() in load() aveva già migrato e marcato come "fatta" la
                 // migrazione, ma su una copia temporanea (i dati letti da localStorage prima
@@ -3440,7 +3655,7 @@ const DB = {
                 console.log("🔄 IndexedDB vuoto, migrazione dati iniziali da LocalStorage...");
                 await dexieDB.transaction('rw',
                     dexieDB.clienti, dexieDB.interventi, dexieDB.ricambi,
-                    dexieDB.fornitori, dexieDB.bolle, dexieDB.ordini, dexieDB.inventari,
+                    dexieDB.fornitori, dexieDB.bolle, dexieDB.ordini, dexieDB.inventari, dexieDB.appuntamenti,
                     async () => {
                         await Promise.all([
                             dexieDB.clienti.clear().then(() => dexieDB.clienti.bulkPut(this.clienti)),
@@ -3449,7 +3664,8 @@ const DB = {
                             dexieDB.fornitori.clear().then(() => dexieDB.fornitori.bulkPut(this.fornitori)),
                             dexieDB.bolle.clear().then(() => dexieDB.bolle.bulkPut(this.bolle)),
                             dexieDB.ordini.clear().then(() => dexieDB.ordini.bulkPut(this.ordini)),
-                            dexieDB.inventari.clear().then(() => dexieDB.inventari.bulkPut(this.inventari))
+                            dexieDB.inventari.clear().then(() => dexieDB.inventari.bulkPut(this.inventari)),
+                            dexieDB.appuntamenti.clear().then(() => dexieDB.appuntamenti.bulkPut(this.appuntamenti))
                         ]);
                     }
                 );
@@ -3617,7 +3833,7 @@ const DB = {
         // garantisce che un salvataggio non possa mai lasciare un archivio svuotato.
         await dexieDB.transaction('rw',
             dexieDB.clienti, dexieDB.interventi, dexieDB.ricambi,
-            dexieDB.fornitori, dexieDB.bolle, dexieDB.ordini, dexieDB.inventari,
+            dexieDB.fornitori, dexieDB.bolle, dexieDB.ordini, dexieDB.inventari, dexieDB.appuntamenti,
             async () => {
                 await Promise.all([
                     this._syncTable(dexieDB.clienti, this.clienti),
@@ -3626,7 +3842,8 @@ const DB = {
                     this._syncTable(dexieDB.fornitori, this.fornitori),
                     this._syncTable(dexieDB.bolle, this.bolle),
                     this._syncTable(dexieDB.ordini, this.ordini),
-                    this._syncTable(dexieDB.inventari, this.inventari)
+                    this._syncTable(dexieDB.inventari, this.inventari),
+                    this._syncTable(dexieDB.appuntamenti, this.appuntamenti)
                 ]);
             }
         );
@@ -3659,6 +3876,7 @@ const DB = {
         localStorage.setItem('ivd_bolle', JSON.stringify(this.bolle));
         localStorage.setItem('ivd_ordini', JSON.stringify(this.ordini));
         localStorage.setItem('ivd_inventari', JSON.stringify(this.inventari));
+        localStorage.setItem('ivd_appuntamenti', JSON.stringify(this.appuntamenti));
         localStorage.setItem('ivd_nextId', JSON.stringify(this._nextId));
         localStorage.setItem('ivd_opzioni', JSON.stringify(this.opzioni));
     },
@@ -3700,6 +3918,13 @@ const DB = {
             if (!o.id) errors.push('Ordine senza ID: ' + (o.numero || '?'));
             if (o.fornitoreId && !this.fornitori.find(f => f.id === o.fornitoreId))
                 warnings.push('Ordine #' + o.id + ': fornitore #' + o.fornitoreId + ' inesistente');
+        });
+        (this.appuntamenti || []).forEach(a => {
+            if (!a.id) errors.push('Appuntamento senza ID: ' + (a.data || '?'));
+            if (a.clienteId && !this.clienti.find(c => c.id === a.clienteId))
+                warnings.push('Appuntamento #' + a.id + ': cliente #' + a.clienteId + ' inesistente');
+            if (a.interventoId && !this.interventi.find(i => i.id === a.interventoId))
+                warnings.push('Appuntamento #' + a.id + ': intervento collegato #' + a.interventoId + ' inesistente');
         });
         return { errors, warnings };
     },
@@ -4086,6 +4311,7 @@ function renderAll(section) {
       console.log("Esecuzione renderAll (full)...");
       renderDashboard();
       renderClienti();
+      renderAppuntamenti();
       renderInterventi();
       renderRicambi();
       renderFornitori();
@@ -4096,6 +4322,7 @@ function renderAll(section) {
       const map = {
         dashboard: renderDashboard,
         clienti: renderClienti,
+        appuntamenti: renderAppuntamenti,
         interventi: renderInterventi,
         ricambi: renderRicambi,
         fornitori: renderFornitori,
@@ -4630,7 +4857,7 @@ function showSection(id) {
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
   document.getElementById('section-' + id).classList.add('active');
-  const navIds = ['dashboard','clienti','interventi','ricambi','fornitori','inventario','bolle','impostazioni'];
+  const navIds = ['dashboard','clienti','appuntamenti','interventi','ricambi','fornitori','inventario','bolle','impostazioni'];
   const idx = navIds.indexOf(id);
   if (idx !== -1) {
     const navBtns = document.querySelectorAll('nav button');
@@ -6393,7 +6620,10 @@ function renderDashboard() {
   const sogliaRicambi = (DB.ricambi || []).filter(r => r && r.qta === 0).length;
 
   const setT = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  const oggiDash = today();
+  const appuntamentiInProgramma = (DB.appuntamenti || []).filter(a => a && a.stato !== 'Annullato' && a.stato !== 'Completato' && (a.data||'') >= oggiDash).length;
   setT('stat-clienti', (DB.clienti || []).length);
+  setT('stat-appuntamenti', appuntamentiInProgramma);
   setT('stat-aperti', aperti);
   setT('stat-chiusi', chiusi);
   setT('stat-scorte', sogliaRicambi);
@@ -6417,6 +6647,27 @@ function renderDashboard() {
       const altri = critici.length > 10 ? `... e altri ${critici.length - 10}` : '';
       alerts.innerHTML += `<div class="alert alert-danger">⛔ <strong>${critici.length} ricambi esauriti:</strong> ${mostrati.map(r=>r.descrizione).join(', ')} ${altri}</div>`;
     }
+  }
+
+  // Prossimi appuntamenti
+  const prossimi = [...(DB.appuntamenti || [])]
+    .filter(a => a && a.stato !== 'Annullato' && a.stato !== 'Completato' && (a.data||'') >= oggiDash)
+    .sort((a,b) => (a.data||'').localeCompare(b.data||'') || (a.oraInizio||'').localeCompare(b.oraInizio||''))
+    .slice(0, 6);
+  const dashApp = document.getElementById('dash-appuntamenti');
+  if (dashApp) {
+    if (prossimi.length === 0) { dashApp.innerHTML = '<div style="color:var(--text-muted);font-size:0.85rem;padding:16px 0;">Nessun appuntamento in programma</div>'; }
+    else dashApp.innerHTML = prossimi.map(a => {
+      const cl = (DB.clienti || []).find(c => c && c.id === a.clienteId);
+      const orario = a.oraInizio ? ' · ' + a.oraInizio : '';
+      const strumentiTesto = _elencoStrumentiAppuntamento(a).map(s => s.modello).join(', ') || '—';
+      return `<div class="list-item-dash" style="cursor:pointer;" onclick="showSection('appuntamenti'); openAppuntamentoModal(${a.id})">
+        <div class="list-item-left">
+          <strong>${escHtml(fmtDateShort(a.data))}${orario} — ${cl ? escHtml(cl.ragione) : '—'}</strong>
+          <span>${escHtml(strumentiTesto)}${a.tecnico ? ' · ' + escHtml(a.tecnico) : ''}</span>
+        </div>
+      </div>`;
+    }).join('');
   }
 
   // Ultimi interventi
@@ -7847,9 +8098,29 @@ function _salvaInterventoImpl() {
     DB.interventi.push(obj);
   }
 
+  // Se questo intervento nasce dalla coda di conversione di un appuntamento (vedi
+  // convertiAppuntamentoInIntervento), ricollega qui lo strumento appena convertito — fatto
+  // al salvataggio (non alla sola apertura del form) così annullare la creazione
+  // dell'intervento non lascia lo strumento agganciato a un intervento inesistente.
+  if (_codaConversioneAppuntamento) {
+    const app = DB.appuntamenti.find(x => x.id === _codaConversioneAppuntamento);
+    if (app) {
+      const strumenti = _elencoStrumentiAppuntamento(app);
+      const prossimo = strumenti.find(s => !s.interventoId);
+      if (prossimo) prossimo.interventoId = editInterventoId || obj.id;
+      app.strumenti = strumenti;
+    } else {
+      _codaConversioneAppuntamento = null;
+    }
+  }
+
   DB.save();
   closeModal('modalIntervento');
   renderAll();
+
+  // Se la coda non si è auto-svuotata sopra (mancava un app valido), prosegue con il prossimo
+  // strumento da convertire, o finalizza l'appuntamento se era l'ultimo.
+  if (_codaConversioneAppuntamento) _apriProssimoInterventoDaCoda();
 }
 
 function cambiaStatoIntervento(id, nuovoStato) {
@@ -7873,9 +8144,512 @@ function cambiaStatoIntervento(id, nuovoStato) {
   
   DB.save();
   renderInterventi();
-  
+
   // Feedback visivo
   mostraToast(`Stato intervento ${i.numero} cambiato in "${nuovoStato}"`, 'success');
+}
+
+// ======================== APPUNTAMENTI ========================
+// Pianificazione delle visite tecniche: cliente, strumento, guasto segnalato e tecnico
+// assegnato, con conversione diretta in intervento quando la visita viene effettuata.
+let editAppuntamentoId = null;
+// Data (YYYY-MM-DD) cliccata nel calendario mensile: letta una tantum da openAppuntamentoModal()
+// per precompilare il campo data di un nuovo appuntamento, poi azzerata.
+let _calAppDataPreselezionata = null;
+// Id dell'appuntamento in corso di conversione "a coda": ogni strumento spuntato genera un
+// intervento separato con il proprio numero di chiamata. Consumato da _salvaInterventoImpl()
+// ad ogni salvataggio: ricollega lo strumento appena convertito e, se ne restano altri, apre
+// subito il prossimo — vedi _apriProssimoInterventoDaCoda(). null quando nessuna coda è attiva.
+let _codaConversioneAppuntamento = null;
+
+function openAppuntamentoModal(id = null) {
+  editAppuntamentoId = id;
+  const a = id ? DB.appuntamenti.find(x => x.id === id) : null;
+  document.getElementById('modalAppuntamentoTitolo').textContent = id ? 'Modifica appuntamento' : 'Nuovo appuntamento';
+
+  const actWrap = document.getElementById('modalAppuntamentoActions');
+  if (actWrap) {
+    actWrap.innerHTML = id ? `<button class="btn btn-outline-danger btn-sm" onclick="closeModal('modalAppuntamento'); eliminaAppuntamento(${id})">🗑️ Elimina</button>` : '';
+  }
+
+  const selCl = document.getElementById('app_cliente');
+  selCl.innerHTML = '<option value="">-- Seleziona cliente --</option>' +
+    DB.clienti.map(c => `<option value="${c.id}">${escHtml(c.ragione)}</option>`).join('');
+
+  popolaSelectOpzioni(); // aggiorna anche l'elenco tecnici in app_tecnico
+
+  const esitoWrap = document.getElementById('app_esito_wrap');
+  const btnConverti = document.getElementById('btnConvertiAppuntamento');
+
+  if (a) {
+    document.getElementById('app_cliente').value = a.clienteId || '';
+    document.getElementById('app_data').value = a.data || '';
+    document.getElementById('app_ora_inizio').value = a.oraInizio || '';
+    document.getElementById('app_ora_fine').value = a.oraFine || '';
+    document.getElementById('app_stato').value = a.stato || 'Programmato';
+    document.getElementById('app_problema').value = a.problema || '';
+    document.getElementById('app_note').value = a.note || '';
+    document.getElementById('app_tecnico').value = a.tecnico || '';
+    aggiornaStrumentiClienteAppuntamento(_elencoStrumentiAppuntamento(a));
+
+    const strumentiEsistenti = _elencoStrumentiAppuntamento(a);
+    const tuttiConvertiti = strumentiEsistenti.length > 0 && strumentiEsistenti.every(s => s.interventoId);
+    esitoWrap.style.display = tuttiConvertiti ? 'block' : 'none';
+    btnConverti.style.display = (tuttiConvertiti || a.stato === 'Annullato') ? 'none' : '';
+  } else {
+    document.getElementById('app_cliente').value = '';
+    document.getElementById('app_data').value = _calAppDataPreselezionata || today();
+    _calAppDataPreselezionata = null;
+    document.getElementById('app_ora_inizio').value = '';
+    document.getElementById('app_ora_fine').value = '';
+    document.getElementById('app_stato').value = 'Programmato';
+    document.getElementById('app_problema').value = '';
+    document.getElementById('app_note').value = '';
+    document.getElementById('app_tecnico').value = '';
+    aggiornaStrumentiClienteAppuntamento();
+    esitoWrap.style.display = 'none';
+    btnConverti.style.display = 'none';
+  }
+  document.getElementById('app_strumento_extra').value = '';
+
+  openModal('modalAppuntamento');
+}
+
+// Normalizza gli strumenti di un appuntamento in [{modello, seriale, numeroChiamata,
+// interventoId}], leggendo il nuovo campo array a.strumenti se presente, altrimenti gli
+// storici a.strumento/a.seriale/a.interventoId singoli (appuntamenti creati prima
+// dell'introduzione della selezione multipla e del numero di chiamata per strumento).
+function _elencoStrumentiAppuntamento(a) {
+  if (Array.isArray(a?.strumenti) && a.strumenti.length) return a.strumenti;
+  if (a?.strumento) return [{ modello: a.strumento, seriale: a.seriale || '', numeroChiamata: '', interventoId: a.interventoId || null }];
+  return [];
+}
+
+// Popola la lista di checkbox degli strumenti installati presso il cliente scelto (stesso
+// pattern di aggiornaStrumentiCliente, ma indipendente: il form appuntamento non deve
+// innescare gli effetti collaterali di quello intervento — fornitore, numero progressivo,
+// firma — che qui non hanno senso). preselezionati (array {modello,seriale}) marca come
+// spuntati gli strumenti già scelti in modifica; quelli non più presenti nell'elenco del
+// cliente (es. rimosso dalla scheda cliente nel frattempo) vengono comunque aggiunti come
+// riga extra spuntata, per non perdere il dato salvato.
+function aggiornaStrumentiClienteAppuntamento(preselezionati = null) {
+  const cid = parseInt(document.getElementById('app_cliente').value);
+  const cl = DB.clienti.find(c => c.id === cid);
+  const wrap = document.getElementById('app_strumenti_lista');
+  if (!cl) { wrap.innerHTML = '<span style="font-size:0.8rem; color:var(--text-muted);">Seleziona prima un cliente</span>'; return; }
+
+  const strumenti = cl.strumentiInstallati || migraStrumenti(cl.strumenti||'');
+  // Mappa (non Set) perché ogni voce preselezionata porta con sé anche il numero di chiamata
+  // e l'eventuale intervento già creato per quello strumento, da riproporre in modifica.
+  const preMap = new Map((preselezionati||[]).map(p => [(p.modello||'') + '|' + (p.seriale||''), p]));
+  const righe = strumenti.map(s => {
+    const key = (s.modello||'') + '|' + (s.seriale||'');
+    const pre = preMap.get(key);
+    const checked = !!pre || (!preselezionati && strumenti.length === 1);
+    if (pre) preMap.delete(key);
+    return _rigaCheckboxStrumentoAppuntamento(s.modello, s.seriale, checked, pre?.numeroChiamata, pre?.interventoId);
+  });
+
+  // Strumenti salvati in precedenza ma non (più) presenti nell'elenco del cliente: si
+  // aggiungono come righe extra già spuntate, così modificare l'appuntamento non li fa
+  // sparire silenziosamente (e non perde il numero di chiamata/intervento già collegato).
+  preMap.forEach(p => righe.push(_rigaCheckboxStrumentoAppuntamento(p.modello, p.seriale, true, p.numeroChiamata, p.interventoId)));
+
+  wrap.innerHTML = righe.join('') || '<span style="font-size:0.8rem; color:var(--text-muted);">Nessuno strumento installato registrato per questo cliente — usa "Aggiungi" qui sotto.</span>';
+}
+
+// Una riga = uno strumento: checkbox+nome a sinistra, numero di chiamata (una colonna
+// dedicata, letta poi da _leggiStrumentiSelezionatiAppuntamento) e — se lo strumento ha già
+// generato un intervento — un'icona per riaprirlo, con l'input del numero disabilitato
+// (cambiarlo qui non modificherebbe più il numero già assegnato all'intervento reale).
+function _rigaCheckboxStrumentoAppuntamento(modello, seriale, checked, numeroChiamata, interventoId) {
+  const convertito = !!interventoId;
+  // width/flex-shrink espliciti sul checkbox: la regola globale "input,select,textarea{width:
+  // 100%}" si applica anche ai checkbox, e qui ogni riga occupa tutta la larghezza del modale
+  // — senza questo vincolo il checkbox si allarga a riempire la riga, spingendo il testo del
+  // modello fuori vista sulla destra invece di restarci accanto.
+  return `<div class="app-strumento-row" style="display:flex; align-items:center; gap:8px; padding:3px 0;">
+    <label style="display:flex; align-items:center; gap:8px; font-size:0.85rem; cursor:pointer; flex:1; min-width:0;">
+      <input type="checkbox" class="app-strumento-chk" data-modello="${escRaw(modello||'')}" data-seriale="${escRaw(seriale||'')}" data-intervento-id="${interventoId||''}" ${checked?'checked':''} style="width:16px; height:16px; flex:0 0 16px; margin:0;">
+      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escHtml(modello||'(senza nome)')}${seriale?' — S/N: '+escHtml(seriale):''}</span>
+    </label>
+    <input type="text" class="app-strumento-numero" value="${escRaw(numeroChiamata||'')}" placeholder="N° chiamata" ${convertito?'disabled':''} style="width:110px; flex:0 0 110px; height:28px; font-size:0.78rem; padding:3px 8px;">
+    ${convertito
+      ? `<button type="button" class="btn btn-ghost btn-sm btn-icon" onclick="apriInterventoDaAppuntamento(${interventoId})" title="Apri intervento collegato" style="flex:0 0 auto;">🔧</button>`
+      : `<span style="flex:0 0 30px;"></span>`}
+  </div>`;
+}
+
+// Aggiunge uno strumento non presente nella scheda del cliente (es. apparecchiatura nuova,
+// non ancora registrata) come riga extra già spuntata.
+function aggiungiStrumentoExtraAppuntamento() {
+  const input = document.getElementById('app_strumento_extra');
+  const val = input.value.trim();
+  if (!val) return;
+  const wrap = document.getElementById('app_strumenti_lista');
+  if (wrap.querySelector('span') && !wrap.querySelector('input[type=checkbox]')) wrap.innerHTML = ''; // rimuove il messaggio placeholder
+  wrap.insertAdjacentHTML('beforeend', _rigaCheckboxStrumentoAppuntamento(val, '', true, '', null));
+  input.value = '';
+  input.focus();
+}
+
+function apriInterventoDaAppuntamento(interventoId) {
+  closeModal('modalAppuntamento');
+  showSection('interventi');
+  openInterventoModal(interventoId);
+}
+
+function _leggiStrumentiSelezionatiAppuntamento() {
+  return [...document.querySelectorAll('#app_strumenti_lista .app-strumento-row')]
+    .filter(row => row.querySelector('.app-strumento-chk')?.checked)
+    .map(row => {
+      const chk = row.querySelector('.app-strumento-chk');
+      const numInput = row.querySelector('.app-strumento-numero');
+      return {
+        modello: chk.dataset.modello || '',
+        seriale: chk.dataset.seriale || '',
+        numeroChiamata: (numInput?.value || '').trim(),
+        interventoId: parseInt(chk.dataset.interventoId) || null
+      };
+    });
+}
+
+function salvaAppuntamento() { _eseguiSalvataggioProtetto('appuntamento', _salvaAppuntamentoImpl); }
+function _salvaAppuntamentoImpl() {
+  const id = _persistiAppuntamentoDaForm();
+  if (!id) return;
+  DB.save();
+  closeModal('modalAppuntamento');
+  renderAll();
+  mostraToast('✅ Appuntamento salvato', 'success');
+}
+
+// Legge il form corrente e scrive/crea il record in DB.appuntamenti, senza salvare su disco,
+// chiudere il modal o mostrare toast: usata sia dal salvataggio esplicito sopra sia da
+// convertiAppuntamentoInIntervento(), che deve prima persistere eventuali modifiche appena
+// fatte (es. un numero di chiamata digitato un istante prima di premere "Crea intervento").
+// Ritorna l'id dell'appuntamento salvato, o null se la validazione fallisce.
+function _persistiAppuntamentoDaForm() {
+  const clienteId = parseInt(document.getElementById('app_cliente').value);
+  const data = document.getElementById('app_data').value;
+  if (!clienteId) { mostraToast('Seleziona un cliente'); return null; }
+  if (!data) { mostraToast('Inserisci la data'); return null; }
+
+  const strumentiSelezionati = _leggiStrumentiSelezionatiAppuntamento();
+  const obj = {
+    clienteId, data,
+    oraInizio: document.getElementById('app_ora_inizio').value,
+    oraFine: document.getElementById('app_ora_fine').value,
+    stato: document.getElementById('app_stato').value || 'Programmato',
+    strumenti: strumentiSelezionati,
+    // Campi singolari mantenuti in scrittura per compatibilità con eventuali integrazioni
+    // esterne che leggessero ancora questo formato: rispecchiano il primo strumento scelto.
+    strumento: strumentiSelezionati[0]?.modello || '',
+    seriale: strumentiSelezionati[0]?.seriale || '',
+    problema: document.getElementById('app_problema').value.trim(),
+    tecnico: document.getElementById('app_tecnico').value,
+    note: document.getElementById('app_note').value.trim(),
+  };
+
+  if (editAppuntamentoId) {
+    const idx = DB.appuntamenti.findIndex(x => x.id === editAppuntamentoId);
+    DB.appuntamenti[idx] = { ...DB.appuntamenti[idx], ...obj };
+    DB.auditLog('update', 'appuntamento', editAppuntamentoId, `Modificato appuntamento del ${data}`);
+    return editAppuntamentoId;
+  } else {
+    obj.id = DB.nextId('appuntamento');
+    obj.createdAt = today();
+    DB.appuntamenti.push(obj);
+    DB.auditLog('create', 'appuntamento', obj.id, `Creato appuntamento del ${data}`);
+    editAppuntamentoId = obj.id; // un eventuale secondo salvataggio in questa stessa apertura aggiorna, non duplica
+    return obj.id;
+  }
+}
+
+function eliminaAppuntamento(id) {
+  const a = DB.appuntamenti.find(x => x.id === id);
+  if (!a) return;
+  const cl = DB.clienti.find(c => c.id === a.clienteId);
+  if (!confirm(`Eliminare l'appuntamento del ${fmtDate(a.data)}${cl ? ' con ' + (cl.ragione||cl.nome) : ''}?`)) return;
+  DB.appuntamenti = DB.appuntamenti.filter(x => x.id !== id);
+  DB.save();
+  renderAll();
+  mostraToast('Appuntamento eliminato.', 'info');
+  DB.auditLog('delete', 'appuntamento', id, `Eliminato appuntamento del ${a.data}`);
+}
+
+function cambiaStatoAppuntamento(id, nuovoStato) {
+  const a = DB.appuntamenti.find(x => x.id === id);
+  if (!a || a.stato === nuovoStato) return;
+  a.stato = nuovoStato;
+  DB.save();
+  renderAppuntamenti();
+  mostraToast(`Stato appuntamento cambiato in "${nuovoStato}"`, 'success');
+}
+
+// Converte in intervento OGNI strumento spuntato non ancora collegato: ognuno genera un
+// intervento separato, con il proprio numero di chiamata (se inserito). Gli interventi si
+// aprono uno alla volta — _apriProssimoInterventoDaCoda() apre il primo qui, poi
+// _salvaInterventoImpl() ricollega lo strumento appena convertito e apre il successivo ad
+// ogni salvataggio, finché la coda non si esaurisce. Strumenti già collegati a un intervento
+// esistente vengono saltati (non riconvertiti).
+function convertiAppuntamentoInIntervento(id = null) {
+  let appId = id;
+  if (!appId) {
+    // Chiamata dal pulsante nel form aperto: persiste prima eventuali modifiche appena fatte
+    // (es. un numero di chiamata digitato un istante fa) così la coda parte dai dati giusti.
+    appId = _persistiAppuntamentoDaForm();
+    if (!appId) return;
+    DB.save();
+  }
+  const a = DB.appuntamenti.find(x => x.id === appId);
+  if (!a) return;
+
+  const strumenti = _elencoStrumentiAppuntamento(a);
+  if (!strumenti.length) { mostraToast('Nessuno strumento selezionato per questo appuntamento.'); return; }
+  const daConvertire = strumenti.filter(s => !s.interventoId);
+  if (!daConvertire.length) {
+    const ids = [...new Set(strumenti.map(s => s.interventoId).filter(Boolean))];
+    if (ids.length === 1) { showSection('interventi'); openInterventoModal(ids[0]); }
+    else mostraToast(`Tutti gli strumenti di questo appuntamento hanno già un intervento collegato (${ids.length}).`);
+    return;
+  }
+
+  _codaConversioneAppuntamento = appId;
+  closeModal('modalAppuntamento');
+  _apriProssimoInterventoDaCoda();
+}
+
+// Apre l'intervento per il prossimo strumento non ancora convertito nella coda attiva. Se non
+// ne restano, chiude la coda e marca l'appuntamento come Completato.
+function _apriProssimoInterventoDaCoda() {
+  if (!_codaConversioneAppuntamento) return;
+  const a = DB.appuntamenti.find(x => x.id === _codaConversioneAppuntamento);
+  if (!a) { _codaConversioneAppuntamento = null; return; }
+
+  const strumenti = _elencoStrumentiAppuntamento(a);
+  const daConvertire = strumenti.filter(s => !s.interventoId);
+  if (!daConvertire.length) {
+    a.stato = 'Completato';
+    DB.save();
+    _codaConversioneAppuntamento = null;
+    renderAll();
+    mostraToast(strumenti.length === 1 ? '✅ Intervento creato dall\'appuntamento.' : `✅ Creati tutti i ${strumenti.length} interventi per l'appuntamento.`, 'success');
+    return;
+  }
+
+  const prossimo = daConvertire[0];
+  const totale = strumenti.length;
+  const fatti = totale - daConvertire.length;
+
+  openInterventoModal();
+  document.getElementById('i_cliente').value = a.clienteId || '';
+  aggiornaStrumentiCliente();
+  document.getElementById('i_strumento').value = prossimo.modello || '';
+  document.getElementById('i_seriale').value = prossimo.seriale || '';
+  if (prossimo.numeroChiamata) document.getElementById('i_numero').value = prossimo.numeroChiamata;
+  document.getElementById('i_problema').value = a.problema || '';
+  document.getElementById('i_data').value = a.data || today();
+  if (a.tecnico) {
+    const tecSel = document.getElementById('i_tecnico');
+    if (tecSel && [...tecSel.options].some(o => o.value === a.tecnico)) tecSel.value = a.tecnico;
+  }
+  mostraToast(`📋 Intervento ${fatti+1} di ${totale} — ${prossimo.modello}${prossimo.numeroChiamata ? ' (N° ' + prossimo.numeroChiamata + ')' : ''}. Salva per passare al successivo.`, 'success');
+}
+
+function renderAppuntamenti() {
+  const search = (document.getElementById('searchAppuntamenti')?.value || '').toLowerCase();
+  const filtroStato = document.getElementById('filterStatoAppuntamento')?.value || '';
+  const filtroTecnico = document.getElementById('filterTecnicoAppuntamento')?.value || '';
+  const soloFuturi = document.getElementById('filterSoloFuturiAppuntamento')?.checked;
+
+  const tSel = document.getElementById('filterTecnicoAppuntamento');
+  if (tSel) {
+    const tCurrent = tSel.value;
+    tSel.innerHTML = '<option value="">Tutti i tecnici</option>' +
+      (DB.opzioni.tecnici||[]).map(t => `<option value="${escRaw(t)}"${t===tCurrent?' selected':''}>${escHtml(t)}</option>`).join('');
+  }
+
+  const oggi = today();
+  let list = (DB.appuntamenti || []).filter(a => {
+    if (!a) return false;
+    const cl = DB.clienti.find(c => c.id === a.clienteId);
+    const strumentiTesto = _elencoStrumentiAppuntamento(a).map(s => s.modello).join(' ').toLowerCase();
+    const matchStr = !search ||
+      (cl && String(cl.ragione||'').toLowerCase().includes(search)) ||
+      strumentiTesto.includes(search) ||
+      String(a.problema||'').toLowerCase().includes(search) ||
+      String(a.tecnico||'').toLowerCase().includes(search);
+    const matchStato = !filtroStato || a.stato === filtroStato;
+    const matchTecnico = !filtroTecnico || a.tecnico === filtroTecnico;
+    const matchFuturi = !soloFuturi || (a.data||'') >= oggi;
+    return matchStr && matchStato && matchTecnico && matchFuturi;
+  }).sort((x,y) => (x.data||'').localeCompare(y.data||'') || (x.oraInizio||'').localeCompare(y.oraInizio||''));
+
+  const cntEl = document.getElementById('appuntamenti-count');
+  if (cntEl) cntEl.textContent = `${list.length} appuntament${list.length !== 1 ? 'i' : 'o'}`;
+
+  const tb = document.getElementById('tbAppuntamenti');
+  if (!tb) return;
+  if (list.length === 0) {
+    tb.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="icon">📅</div><p>Nessun appuntamento trovato</p></div></td></tr>`;
+    return;
+  }
+
+  const statoColori = {
+    'Programmato': { bg: '#3b82f6', text: '#ffffff' },
+    'Confermato':  { bg: '#8b5cf6', text: '#ffffff' },
+    'Completato':  { bg: '#10b981', text: '#ffffff' },
+    'Annullato':   { bg: '#ef4444', text: '#ffffff' }
+  };
+
+  tb.innerHTML = list.map(a => {
+    const cl = DB.clienti.find(c => c && c.id === a.clienteId);
+    const strumentiList = _elencoStrumentiAppuntamento(a);
+    const strumentiTesto = strumentiList.map(s => s.modello).join(', ') || '—';
+    const sc = statoColori[a.stato] || { bg: 'var(--surface2)', text: 'var(--text)' };
+    const statoSelect = `
+      <select onchange="cambiaStatoAppuntamento(${a.id}, this.value)"
+              style="background:${sc.bg}; color:${sc.text}; border:none; border-radius:6px; padding:4px 8px; font-size:0.82rem; font-weight:600; cursor:pointer; min-width:100px; text-align:center;"
+              onclick="event.stopPropagation();"
+              title="Clicca per cambiare stato">
+        <option value="Programmato" ${a.stato==='Programmato'?'selected':''} style="background:#3b82f6;color:#fff">Programmato</option>
+        <option value="Confermato"  ${a.stato==='Confermato'?'selected':''}  style="background:#8b5cf6;color:#fff">Confermato</option>
+        <option value="Completato"  ${a.stato==='Completato'?'selected':''}  style="background:#10b981;color:#fff">Completato</option>
+        <option value="Annullato"   ${a.stato==='Annullato'?'selected':''}   style="background:#ef4444;color:#fff">Annullato</option>
+      </select>`;
+
+    const orario = a.oraInizio ? escHtml(a.oraInizio) + (a.oraFine ? '–' + escHtml(a.oraFine) : '') : '';
+    const interventiCollegati = [...new Set(strumentiList.map(s => s.interventoId).filter(Boolean))];
+    const tuttiConvertiti = strumentiList.length > 0 && strumentiList.every(s => s.interventoId);
+    const convertiIcon = tuttiConvertiti
+      ? `<button class="btn btn-ghost btn-sm btn-icon" onclick="event.stopPropagation(); ${interventiCollegati.length === 1 ? `showSection('interventi'); openInterventoModal(${interventiCollegati[0]})` : `mostraToast('Interventi collegati: ' + ${JSON.stringify(interventiCollegati.length)})`}" title="${interventiCollegati.length === 1 ? 'Apri intervento collegato' : interventiCollegati.length + ' interventi collegati'}">🔧</button>`
+      : (a.stato !== 'Annullato' ? `<button class="btn btn-ghost btn-sm btn-icon" onclick="event.stopPropagation(); convertiAppuntamentoInIntervento(${a.id})" title="${interventiCollegati.length ? 'Continua la creazione degli interventi rimanenti' : 'Crea intervento da questo appuntamento'}">➡️</button>` : '');
+
+    return `<tr>
+      <td>
+        <strong style="cursor:pointer; color:var(--text-light);" onclick="openAppuntamentoModal(${a.id})">${fmtDateShort(a.data)}</strong>
+        ${orario ? `<div style="font-size:0.78rem;color:var(--text-muted);">${orario}</div>` : ''}
+      </td>
+      <td>${cl ? `<span style="cursor:pointer;color:var(--text-light);font-weight:500;" onclick="openClienteModal(${cl.id})" title="Apri scheda cliente">${escHtml(trunc(cl.ragione, 40))}</span>` : '<em style="color:var(--text-muted)">N/D</em>'}</td>
+      <td title="${escAttr(strumentiTesto)}">${escHtml(trunc(strumentiTesto, 24))}${strumentiList.length > 1 ? ` <span class="tag" style="font-size:0.65rem;">+${strumentiList.length-1}</span>` : ''}</td>
+      <td title="${escAttr(a.problema||'')}">${escHtml(trunc(a.problema||'—', 40))}</td>
+      <td>${escHtml(a.tecnico||'—')}</td>
+      <td>${statoSelect}</td>
+      <td>
+        <div class="action-btns">
+          ${convertiIcon}
+          <button class="btn btn-ghost btn-sm btn-icon" onclick="openAppuntamentoModal(${a.id})" title="Modifica">✏️</button>
+          <button class="btn btn-ghost btn-sm btn-icon" onclick="eliminaAppuntamento(${a.id})" title="Elimina">🗑️</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  if (_calAppVista === 'calendario') renderCalendarioAppuntamenti();
+}
+
+// ======================== CALENDARIO APPUNTAMENTI ========================
+let _calAppVista = 'lista';
+const _calAppOggi = new Date();
+let _calAppMese = _calAppOggi.getMonth();   // 0-11
+let _calAppAnno = _calAppOggi.getFullYear();
+
+function cambiaVistaAppuntamenti(vista) {
+  _calAppVista = vista;
+  document.getElementById('appViewLista').style.display = vista === 'lista' ? '' : 'none';
+  document.getElementById('appViewCalendario').style.display = vista === 'calendario' ? '' : 'none';
+  document.getElementById('btnAppVistaLista').classList.toggle('btn-primary', vista === 'lista');
+  document.getElementById('btnAppVistaLista').classList.toggle('btn-ghost', vista !== 'lista');
+  document.getElementById('btnAppVistaCalendario').classList.toggle('btn-primary', vista === 'calendario');
+  document.getElementById('btnAppVistaCalendario').classList.toggle('btn-ghost', vista !== 'calendario');
+  if (vista === 'calendario') renderCalendarioAppuntamenti();
+}
+
+function cambiaMeseCalendarioAppuntamenti(delta) {
+  _calAppMese += delta;
+  if (_calAppMese < 0) { _calAppMese = 11; _calAppAnno--; }
+  if (_calAppMese > 11) { _calAppMese = 0; _calAppAnno++; }
+  renderCalendarioAppuntamenti();
+}
+
+function vaiOggiCalendarioAppuntamenti() {
+  const oggi = new Date();
+  _calAppMese = oggi.getMonth();
+  _calAppAnno = oggi.getFullYear();
+  renderCalendarioAppuntamenti();
+}
+
+// Apre la scheda nuovo appuntamento con la data del giorno cliccato già impostata.
+function apriNuovoAppuntamentoData(dataStr) {
+  _calAppDataPreselezionata = dataStr;
+  openAppuntamentoModal();
+}
+
+function renderCalendarioAppuntamenti() {
+  const grid = document.getElementById('calAppGrid');
+  const titolo = document.getElementById('calAppTitolo');
+  if (!grid || !titolo) return;
+
+  const nomiMesi = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+  titolo.textContent = `${nomiMesi[_calAppMese]} ${_calAppAnno}`;
+
+  const primoGiorno = new Date(_calAppAnno, _calAppMese, 1);
+  const ultimoGiorno = new Date(_calAppAnno, _calAppMese + 1, 0);
+  const giorniNelMese = ultimoGiorno.getDate();
+  // getDay(): 0=domenica..6=sabato → converti a offset con lunedì come primo giorno (0=lunedì..6=domenica)
+  const offsetInizio = (primoGiorno.getDay() + 6) % 7;
+
+  const oggiStr = today();
+  const statoColori = {
+    'Programmato': '#3b82f6', 'Confermato': '#8b5cf6', 'Completato': '#10b981', 'Annullato': '#ef4444'
+  };
+
+  // Raggruppa gli appuntamenti (non annullati in cima, annullati in coda) per data
+  const perGiorno = {};
+  (DB.appuntamenti || []).forEach(a => {
+    if (!a || !a.data) return;
+    (perGiorno[a.data] = perGiorno[a.data] || []).push(a);
+  });
+  Object.values(perGiorno).forEach(list => list.sort((x,y) => (x.oraInizio||'').localeCompare(y.oraInizio||'')));
+
+  const celle = [];
+  const totaleCelle = offsetInizio + giorniNelMese;
+  const righeGrid = Math.ceil(totaleCelle / 7);
+  const celleTotali = righeGrid * 7;
+
+  for (let i = 0; i < celleTotali; i++) {
+    const numGiorno = i - offsetInizio + 1;
+    let dataCella, fuoriMese = false;
+    if (numGiorno < 1) {
+      const dPrec = new Date(_calAppAnno, _calAppMese, numGiorno);
+      dataCella = dPrec; fuoriMese = true;
+    } else if (numGiorno > giorniNelMese) {
+      const dSucc = new Date(_calAppAnno, _calAppMese, numGiorno);
+      dataCella = dSucc; fuoriMese = true;
+    } else {
+      dataCella = new Date(_calAppAnno, _calAppMese, numGiorno);
+    }
+    const dataStr = dataCella.toISOString().split('T')[0];
+    const eventiGiorno = perGiorno[dataStr] || [];
+    const isOggi = dataStr === oggiStr;
+
+    const maxMostrati = 3;
+    const eventiHtml = eventiGiorno.slice(0, maxMostrati).map(a => {
+      const cl = DB.clienti.find(c => c.id === a.clienteId);
+      const colore = statoColori[a.stato] || '#64748b';
+      const label = cl ? cl.ragione : 'N/D';
+      return `<div class="cal-event" style="background:${colore};" title="${escAttr(label)}" onclick="event.stopPropagation(); openAppuntamentoModal(${a.id})">${escHtml(label)}</div>`;
+    }).join('');
+    const altriHtml = eventiGiorno.length > maxMostrati ? `<div class="cal-more">+${eventiGiorno.length - maxMostrati} altri</div>` : '';
+
+    celle.push(`<div class="cal-day${fuoriMese?' cal-day-out':''}${isOggi?' cal-day-today':''}" onclick="apriNuovoAppuntamentoData('${dataStr}')" title="Clicca per creare un appuntamento il ${fmtDate(dataStr)}">
+      <div class="cal-day-num">${dataCella.getDate()}</div>
+      <div class="cal-day-events">${eventiHtml}${altriHtml}</div>
+    </div>`);
+  }
+
+  grid.innerHTML = celle.join('');
 }
 
 function eliminaIntervento(id) {
@@ -9120,7 +9894,8 @@ function apriRestoreSelettivo() {
   set('rs_cnt_ricambi', (d.ricambi||[]).length);
   set('rs_cnt_fornitori', (d.fornitori||[]).length);
   set('rs_cnt_bolle', (d.bolle||[]).length + (d.ordini||[]).length);
-  
+  set('rs_cnt_appuntamenti', (d.appuntamenti||[]).length);
+
   document.getElementById('rs_warning').style.display = (d.clienti && d.ricambi) ? 'none' : 'block';
   openModal('modalRestoreSelettivo');
 }
@@ -9134,6 +9909,7 @@ function eseguiRipristinoSelettivo() {
     ricambi:    document.getElementById('rs_ricambi').checked,
     fornitori:  document.getElementById('rs_fornitori').checked,
     bolle:      document.getElementById('rs_bolle').checked,
+    appuntamenti: document.getElementById('rs_appuntamenti').checked,
     settings:   document.getElementById('rs_settings').checked
   };
 
@@ -9150,7 +9926,9 @@ function eseguiRipristinoSelettivo() {
     DB.bolle = d.bolle || [];
     DB.ordini = d.ordini || [];
   }
-  
+  if (sel.appuntamenti) DB.appuntamenti = d.appuntamenti || [];
+
+
   if (sel.settings) {
     const imp = _restorePayload.impostazioni || {};
     if (imp.logo) localStorage.setItem('ivd_logo', imp.logo);
@@ -9171,7 +9949,7 @@ function eseguiRipristinoSelettivo() {
   // Sincronizzazione contatori ID (per sicurezza prendiamo il max o i nuovi)
   if (d._nextId) {
     Object.keys(d._nextId).forEach(k => {
-      if (sel[k] || (k==='lotto' && sel.ricambi) || (k==='ordine' && sel.bolle)) {
+      if (sel[k] || (k==='lotto' && sel.ricambi) || (k==='ordine' && sel.bolle) || (k==='appuntamento' && sel.appuntamenti)) {
         DB._nextId[k] = d._nextId[k];
       }
     });
@@ -9543,6 +10321,7 @@ function eseguiBackup() {
         bolle:      DB.bolle,
         ordini:     DB.ordini,
         inventari:  DB.inventari,
+        appuntamenti: DB.appuntamenti,
         _nextId:    DB._nextId,
         opzioni:    DB.opzioni,
         merckPatterns,
@@ -9590,7 +10369,8 @@ function _verificaIntegritaBackup(d) {
   // Rendiamo facoltativi gli archivi nuovi o rimossi per compatibilità
   if (d.bolle && !(d.bolle instanceof Array))   problemi.push('bolle non valide');
   if (d.ordini && !(d.ordini instanceof Array)) problemi.push('ordini non validi');
-  
+  if (d.appuntamenti && !(d.appuntamenti instanceof Array)) problemi.push('appuntamenti non validi');
+
   return { ok: problemi.length === 0, problemi, lotti };
 }
 
@@ -9744,6 +10524,7 @@ function anteprimaRestore(event) {
         <tr><td>Fornitori</td><td>${(d.fornitori||[]).length}</td></tr>
         <tr><td>Bolle Carico/Scarico</td><td>${(d.bolle||[]).length}</td></tr>
         <tr><td>Ordini Ricambi</td><td>${(d.ordini||[]).length}</td></tr>
+        <tr><td>Appuntamenti</td><td>${(d.appuntamenti||[]).length}</td></tr>
         <tr><td>Contatori ID</td><td>${d._nextId ? Object.entries(d._nextId).map(([k,v])=>`${k}:${v}`).join(' · ') : '—'}</td></tr>
         ${hasImpostazioni ? `<tr><td>Impostazioni</td><td>${imp.logo?'Logo ✓':'Logo ✗'} · ${imp.intestazione?'Intestazione ✓':'Intestazione ✗'} · Tema: ${imp.tema||'default'}</td></tr>` : ''}
         ${d.opzioni ? `<tr><td>Opzioni</td><td>Stati: ${(d.opzioni.stati||[]).length} · Tipi: ${(d.opzioni.tipi||[]).length} · Esiti: ${(d.opzioni.esiti||[]).length}</td></tr>` : ''}
@@ -9777,12 +10558,14 @@ function confermarestore() {
   DB.bolle      = d.bolle      || [];
   DB.ordini     = d.ordini     || [];
   DB.inventari  = d.inventari  || [];
-  DB._nextId    = d._nextId    || { cliente:1, intervento:1, ricambio:1, lotto:1, fornitore:1, bolla:1, ordine:1, inventario:1 };
+  DB.appuntamenti = d.appuntamenti || [];
+  DB._nextId    = d._nextId    || { cliente:1, intervento:1, ricambio:1, lotto:1, fornitore:1, bolla:1, ordine:1, inventario:1, appuntamento:1 };
   if (!DB._nextId.lotto)      DB._nextId.lotto      = 1;
   if (!DB._nextId.fornitore)  DB._nextId.fornitore  = 1;
   if (!DB._nextId.bolla)      DB._nextId.bolla      = 1;
   if (!DB._nextId.ordine)     DB._nextId.ordine     = 1;
   if (!DB._nextId.inventario) DB._nextId.inventario = 1;
+  if (!DB._nextId.appuntamento) DB._nextId.appuntamento = 1;
   // Ripristina opzioni intervento se presenti
   if (d.opzioni) {
     DB.opzioni = d.opzioni;
@@ -11749,6 +12532,7 @@ function popolaSelectOpzioni(ripristina = {}) {
   _fill('i_tipo',                op.tipi,    '', tipo);
   _fill('i_esito',               op.esiti,   '', esito);
   _fill('i_tecnico',             op.tecnici, '', tecnico);
+  _fill('app_tecnico',           op.tecnici, '-- Nessuno --');
   _fill('pdf_tipo',              op.tipi,  '');
   _fill('filterStatoIntervento', op.stati, 'Tutti gli stati');
   _fill('filterTipoIntervento',  op.tipi,  'Tutti i tipi');
@@ -13950,10 +14734,16 @@ function loadDemoData() {
     { id:3, ragione:'Werfen Italia S.r.l.', categoria:'Distributore', codice:'FOR-003', contatto:'Marco Ricci', tel:'02 92147411', email:'service.it@werfen.com', sito:'www.werfen.com', piva:'IT01234509871', indirizzo:'Via Salomone 77', citta:'Milano', cap:'20138', prov:'MI', lead:21, prodotti:'ACL Top, Instrumentation Laboratory', note:'Lead time lungo per schede elettroniche', createdAt:'2025-01-01' },
     { id:4, ragione:'Siemens Healthineers Italia', categoria:'OEM / Produttore', codice:'FOR-004', contatto:'Federica Neri', tel:'02 24362950', email:'techsupport.it@siemens-healthineers.com', sito:'www.siemens-healthineers.com', piva:'IT07982120967', indirizzo:'Viale Piero e Alberto Pirelli 10', citta:'Milano', cap:'20126', prov:'MI', lead:14, prodotti:'Immulite, Atellica, Advia', note:'', createdAt:'2025-01-01' },
   ];
+  const _oggiDemo = new Date();
+  const _dataFutura = (giorni) => { const d = new Date(_oggiDemo); d.setDate(d.getDate() + giorni); return d.toISOString().split('T')[0]; };
+  DB.appuntamenti = [
+    { id:1, clienteId:1, data:_dataFutura(3), oraInizio:'09:00', oraFine:'11:00', stato:'Programmato', strumento:'Cobas 6000', seriale:'SN-C6000-1856', problema:'Rumore anomalo durante il ciclo di lavaggio', tecnico:'Anna Colombo', note:'Verificare anche il livello reagenti', createdAt:today() },
+    { id:2, clienteId:2, data:_dataFutura(7), oraInizio:'14:00', oraFine:'', stato:'Confermato', strumento:'Immulite 2000 XPI', seriale:'', problema:'Manutenzione preventiva semestrale', tecnico:'Mario Verdi', note:'', createdAt:today() },
+  ];
   // BUG FIX: mancavano bolla/ordine — la prima bolla o il primo ordine creati dopo il caricamento
   // dei dati demo ricevevano un id NaN (DB.nextId incrementa this._nextId[type], che partiva
   // da undefined), e il contatore restava rotto da lì in avanti.
-  DB._nextId = { cliente:4, intervento:5, ricambio:6, lotto:5, fornitore:5, inventario:1, bolla:1, ordine:1 };
+  DB._nextId = { cliente:4, intervento:5, ricambio:6, lotto:5, fornitore:5, inventario:1, bolla:1, ordine:1, appuntamento:3 };
   DB.save();
   renderAll();
 }
