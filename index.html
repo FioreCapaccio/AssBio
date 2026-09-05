@@ -1169,8 +1169,12 @@
     </div>
 
     <div class="toolbar" style="padding: 12px 16px;">
-      <div class="toolbar-left" style="flex: 0 0 auto;">
-        <input type="text" class="search-input" placeholder="🔍 Cerca intervento..." id="searchInterventi" oninput="_debRenderInterventi()" style="width: 260px; max-width: 100%;">
+      <div class="toolbar-left" style="flex: 0 0 auto; display:flex; gap:8px; align-items:center;">
+        <div style="display:flex; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+          <button class="btn btn-primary btn-sm" id="btnIvVistaLista" onclick="cambiaVistaInterventi('lista')" style="border-radius:0;">📋 Lista</button>
+          <button class="btn btn-ghost btn-sm" id="btnIvVistaCalendario" onclick="cambiaVistaInterventi('calendario')" style="border-radius:0;">📅 Calendario</button>
+        </div>
+        <input type="text" class="search-input" placeholder="🔍 Cerca intervento..." id="searchInterventi" oninput="_debRenderInterventi()" style="width: 220px; max-width: 100%;">
       </div>
       <div class="toolbar-right" style="flex: 1; gap: 6px; flex-wrap: wrap; justify-content: flex-end;">
         <button class="btn btn-ghost btn-sm" onclick="apriOpzioniIntervento()" title="Gestisci stati, tipi ed esiti">⚙️</button>
@@ -1188,59 +1192,85 @@
       </div>
     </div>
 
-    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 12px 0; padding: 10px; background: var(--surface); border-radius: 8px; border: 1px solid var(--border);">
-      <span style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">Filtri:</span>
-      <select class="filter-select" id="filterStatoIntervento" onchange="renderInterventi()">
-        <option value="">Tutti gli stati</option>
-      </select>
-      <select class="filter-select" id="filterTipoIntervento" onchange="renderInterventi()">
-        <option value="">Tutti i tipi</option>
-      </select>
-      <select class="filter-select" id="filterFornitoreIntervento" onchange="renderInterventi()">
-        <option value="">Tutti i fornitori</option>
-      </select>
-      <select class="filter-select" id="filterMeseIntervento" onchange="renderInterventi()">
-        <option value="">Tutti i mesi</option>
-        <option value="01">Gennaio</option>
-        <option value="02">Febbraio</option>
-        <option value="03">Marzo</option>
-        <option value="04">Aprile</option>
-        <option value="05">Maggio</option>
-        <option value="06">Giugno</option>
-        <option value="07">Luglio</option>
-        <option value="08">Agosto</option>
-        <option value="09">Settembre</option>
-        <option value="10">Ottobre</option>
-        <option value="11">Novembre</option>
-        <option value="12">Dicembre</option>
-      </select>
-      <select class="filter-select" id="filterAnnoIntervento" onchange="renderInterventi()">
-        <option value="">Tutti gli anni</option>
-      </select>
-      <span id="interventi-count" style="font-size:0.83rem;color:var(--text-muted);margin-left:auto;"></span>
+    <!-- ===== VISTA LISTA ===== -->
+    <div id="ivViewLista">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 12px 0; padding: 10px; background: var(--surface); border-radius: 8px; border: 1px solid var(--border);">
+        <span style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">Filtri:</span>
+        <select class="filter-select" id="filterStatoIntervento" onchange="renderInterventi()">
+          <option value="">Tutti gli stati</option>
+        </select>
+        <select class="filter-select" id="filterTipoIntervento" onchange="renderInterventi()">
+          <option value="">Tutti i tipi</option>
+        </select>
+        <select class="filter-select" id="filterFornitoreIntervento" onchange="renderInterventi()">
+          <option value="">Tutti i fornitori</option>
+        </select>
+        <select class="filter-select" id="filterMeseIntervento" onchange="renderInterventi()">
+          <option value="">Tutti i mesi</option>
+          <option value="01">Gennaio</option>
+          <option value="02">Febbraio</option>
+          <option value="03">Marzo</option>
+          <option value="04">Aprile</option>
+          <option value="05">Maggio</option>
+          <option value="06">Giugno</option>
+          <option value="07">Luglio</option>
+          <option value="08">Agosto</option>
+          <option value="09">Settembre</option>
+          <option value="10">Ottobre</option>
+          <option value="11">Novembre</option>
+          <option value="12">Dicembre</option>
+        </select>
+        <select class="filter-select" id="filterAnnoIntervento" onchange="renderInterventi()">
+          <option value="">Tutti gli anni</option>
+        </select>
+        <span id="interventi-count" style="font-size:0.83rem;color:var(--text-muted);margin-left:auto;"></span>
+      </div>
+
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>N°</th>
+                <th>Data</th>
+                <th>Cliente</th>
+                <th>Strumento</th>
+                <th>Matricola / S/N</th>  <!-- NUOVA COLONNA -->
+                <th>Tipo</th>
+                <th>Tecnico</th>
+                <th>Stato</th>
+                <th style="text-align:right;">Importo</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tbInterventi">
+              <tr><td colspan="10"><div class="empty-state"><div class="icon">🔧</div><p>Nessun intervento registrato</p></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
-    <div class="card">
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>N°</th>
-              <th>Data</th>
-              <th>Cliente</th>
-              <th>Strumento</th>
-              <th>Matricola / S/N</th>  <!-- NUOVA COLONNA -->
-              <th>Tipo</th>
-              <th>Tecnico</th>
-              <th>Stato</th>
-              <th style="text-align:right;">Importo</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody id="tbInterventi">
-            <tr><td colspan="10"><div class="empty-state"><div class="icon">🔧</div><p>Nessun intervento registrato</p></div></td></tr>
-          </tbody>
-        </table>
+    <!-- ===== VISTA CALENDARIO ===== -->
+    <div id="ivViewCalendario" style="display:none;">
+      <div class="card" style="padding:16px;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" onclick="cambiaMeseCalendarioInterventi(-1)">‹ Mese prec.</button>
+          <button class="btn btn-ghost btn-sm" onclick="vaiOggiCalendarioInterventi()">Oggi</button>
+          <button class="btn btn-ghost btn-sm" onclick="cambiaMeseCalendarioInterventi(1)">Mese succ. ›</button>
+          <h3 id="calIvTitolo" style="margin:0 0 0 8px; text-transform:capitalize;"></h3>
+          <span style="font-size:0.8rem; color:var(--text-muted); margin-left:auto;">Clicca su un giorno per creare un intervento</span>
+        </div>
+        <div class="cal-grid" style="margin-bottom:6px;">
+          <div class="cal-weekday">Lun</div>
+          <div class="cal-weekday">Mar</div>
+          <div class="cal-weekday">Mer</div>
+          <div class="cal-weekday">Gio</div>
+          <div class="cal-weekday">Ven</div>
+          <div class="cal-weekday">Sab</div>
+          <div class="cal-weekday">Dom</div>
+        </div>
+        <div class="cal-grid" id="calIvGrid"></div>
       </div>
     </div>
   </div>
@@ -3396,7 +3426,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.8.6 • 05 set 2026';
+const APP_VERSION = '2.8.7 • 05 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -7167,6 +7197,9 @@ function renderClienti() {
 // ======================== INTERVENTI ========================
 let editInterventoId = null;
 let currentPdfInterventoId = null;
+// Data (YYYY-MM-DD) cliccata nel calendario mensile interventi: letta una tantum da
+// openInterventoModal() per precompilare il campo data di un nuovo intervento, poi azzerata.
+let _calIvDataPreselezionata = null;
 
 // Firma grafica "in sospeso" per la scheda di inserimento/modifica intervento attualmente
 // aperta: null finché non viene disegnata (✍️ Firma ora) o scelta dall'archivio del cliente
@@ -7336,7 +7369,8 @@ function openInterventoModal(id = null) {
   } else {
     const nextNum = 'WO-' + String(DB._nextId.intervento).padStart(4,'0');
     document.getElementById('i_numero').value = nextNum;
-    document.getElementById('i_data').value = today();
+    document.getElementById('i_data').value = _calIvDataPreselezionata || today();
+    _calIvDataPreselezionata = null;
     document.getElementById('i_ora_inizio').value = '';
     document.getElementById('i_ora_fine').value = '';
     document.getElementById('i_stato').value = 'Aperto';
@@ -9329,7 +9363,7 @@ function renderInterventi() {
   }).sort((a,b) => b.data.localeCompare(a.data));
 
   const cntEl = document.getElementById('interventi-count');
-  if (cntEl) cntEl.textContent = `${list.length} intervento${list.length !== 1 ? 'i' : ''}`;
+  if (cntEl) cntEl.textContent = `${list.length} intervent${list.length !== 1 ? 'i' : 'o'}`;
   const tb = document.getElementById('tbInterventi');
   if (list.length === 0) {
     tb.innerHTML = `<tr><td colspan="10"><div class="empty-state"><div class="icon">🔧</div><p>Nessun intervento trovato</p></div></td></tr>`;
@@ -9426,6 +9460,104 @@ function renderInterventi() {
     </tr>`;
   }).join('');
   if (_autoAllineatiCount > 0) DB.save();
+
+  if (_calIvVista === 'calendario') renderCalendarioInterventi();
+}
+
+// ======================== CALENDARIO INTERVENTI ========================
+let _calIvVista = 'lista';
+const _calIvOggi = new Date();
+let _calIvMese = _calIvOggi.getMonth();   // 0-11
+let _calIvAnno = _calIvOggi.getFullYear();
+
+function cambiaVistaInterventi(vista) {
+  _calIvVista = vista;
+  document.getElementById('ivViewLista').style.display = vista === 'lista' ? '' : 'none';
+  document.getElementById('ivViewCalendario').style.display = vista === 'calendario' ? '' : 'none';
+  document.getElementById('btnIvVistaLista').classList.toggle('btn-primary', vista === 'lista');
+  document.getElementById('btnIvVistaLista').classList.toggle('btn-ghost', vista !== 'lista');
+  document.getElementById('btnIvVistaCalendario').classList.toggle('btn-primary', vista === 'calendario');
+  document.getElementById('btnIvVistaCalendario').classList.toggle('btn-ghost', vista !== 'calendario');
+  if (vista === 'calendario') renderCalendarioInterventi();
+}
+
+function cambiaMeseCalendarioInterventi(delta) {
+  _calIvMese += delta;
+  if (_calIvMese < 0) { _calIvMese = 11; _calIvAnno--; }
+  if (_calIvMese > 11) { _calIvMese = 0; _calIvAnno++; }
+  renderCalendarioInterventi();
+}
+
+function vaiOggiCalendarioInterventi() {
+  const oggi = new Date();
+  _calIvMese = oggi.getMonth();
+  _calIvAnno = oggi.getFullYear();
+  renderCalendarioInterventi();
+}
+
+// Apre la scheda nuovo intervento con la data del giorno cliccato già impostata.
+function apriNuovoInterventoData(dataStr) {
+  _calIvDataPreselezionata = dataStr;
+  openInterventoModal();
+}
+
+function renderCalendarioInterventi() {
+  const grid = document.getElementById('calIvGrid');
+  const titolo = document.getElementById('calIvTitolo');
+  if (!grid || !titolo) return;
+
+  const nomiMesi = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+  titolo.textContent = `${nomiMesi[_calIvMese]} ${_calIvAnno}`;
+
+  const primoGiorno = new Date(_calIvAnno, _calIvMese, 1);
+  const ultimoGiorno = new Date(_calIvAnno, _calIvMese + 1, 0);
+  const giorniNelMese = ultimoGiorno.getDate();
+  // getDay(): 0=domenica..6=sabato → converti a offset con lunedì come primo giorno (0=lunedì..6=domenica)
+  const offsetInizio = (primoGiorno.getDay() + 6) % 7;
+
+  const oggiStr = today();
+  const statoColori = { 'Aperto': '#3b82f6', 'In corso': '#f59e0b', 'In attesa ricambi': '#8b5cf6', 'Chiuso': '#10b981', 'Annullato': '#ef4444' };
+
+  const perGiorno = {};
+  (DB.interventi || []).forEach(iv => {
+    if (!iv || !iv.data) return;
+    (perGiorno[iv.data] = perGiorno[iv.data] || []).push(iv);
+  });
+  Object.values(perGiorno).forEach(list => list.sort((x,y) => (x.oraInizio||'').localeCompare(y.oraInizio||'')));
+
+  const celle = [];
+  const totaleCelle = offsetInizio + giorniNelMese;
+  const righeGrid = Math.ceil(totaleCelle / 7);
+  const celleTotali = righeGrid * 7;
+
+  for (let i = 0; i < celleTotali; i++) {
+    const numGiorno = i - offsetInizio + 1;
+    const dataCella = new Date(_calIvAnno, _calIvMese, numGiorno);
+    const fuoriMese = numGiorno < 1 || numGiorno > giorniNelMese;
+    // BUG FIX (già corretto nel calendario appuntamenti): mai passare da toISOString()/UTC
+    // per ricavare la data della cella, altrimenti in un fuso avanti rispetto a UTC (es.
+    // Italia) la data usata per raggruppare gli interventi si disallinea di un giorno dal
+    // numero mostrato. Si costruisce la stringa direttamente dai valori locali.
+    const dataStr = `${dataCella.getFullYear()}-${String(dataCella.getMonth()+1).padStart(2,'0')}-${String(dataCella.getDate()).padStart(2,'0')}`;
+    const eventiGiorno = perGiorno[dataStr] || [];
+    const isOggi = dataStr === oggiStr;
+
+    const maxMostrati = 3;
+    const eventiHtml = eventiGiorno.slice(0, maxMostrati).map(iv => {
+      const cl = DB.clienti.find(c => c.id === iv.clienteId);
+      const colore = statoColori[iv.stato] || '#64748b';
+      const label = (iv.numero ? iv.numero + ' — ' : '') + (cl ? cl.ragione : 'N/D');
+      return `<div class="cal-event" style="background:${colore};" title="${escAttr(label)}" onclick="event.stopPropagation(); viewIntervento(${iv.id})">${escHtml(label)}</div>`;
+    }).join('');
+    const altriHtml = eventiGiorno.length > maxMostrati ? `<div class="cal-more">+${eventiGiorno.length - maxMostrati} altri</div>` : '';
+
+    celle.push(`<div class="cal-day${fuoriMese?' cal-day-out':''}${isOggi?' cal-day-today':''}" onclick="apriNuovoInterventoData('${dataStr}')" title="Clicca per creare un intervento il ${fmtDate(dataStr)}">
+      <div class="cal-day-num">${dataCella.getDate()}</div>
+      <div class="cal-day-events">${eventiHtml}${altriHtml}</div>
+    </div>`);
+  }
+
+  grid.innerHTML = celle.join('');
 }
 
 function mostraNotaIntervento(id) {
