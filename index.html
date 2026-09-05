@@ -1575,10 +1575,11 @@
         <h2>Bolle Carico e Scarico</h2>
         <p>Archivio storico dei movimenti di magazzino</p>
       </div>
-      <div style="display:flex; gap:10px;">
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
         <button class="btn btn-primary" onclick="openOrdineModal()">➕ Nuovo Ordine Ricambi</button>
         <button class="btn btn-ghost" onclick="openBollaModal('scarico')">📤 Nuova Bolla Scarico</button>
         <button class="btn btn-primary" onclick="openBollaModal('carico')">📥 Nuova Bolla Carico</button>
+        <button class="btn btn-success" onclick="openBollaModal('ddt')">🚚 Nuovo D.D.T.</button>
       </div>
     </div>
 
@@ -1589,6 +1590,7 @@
           <option value="">Tutti i tipi</option>
           <option value="carico">Carico</option>
           <option value="scarico">Scarico</option>
+          <option value="ddt">D.D.T.</option>
           <option value="ordine">Ordine</option>
         </select>
       </div>
@@ -1602,7 +1604,7 @@
               <th>Tipo</th>
               <th>N° Bolla</th>
               <th>Data</th>
-              <th>Fornitore</th>
+              <th>Fornitore / Destinatario</th>
               <th>Articoli</th>
               <th>Note</th>
               <th></th>
@@ -2248,7 +2250,7 @@
   </div>
 </div>
 
-<!-- MODAL BOLLA (CARICO/SCARICO) -->
+<!-- MODAL BOLLA (CARICO/SCARICO/D.D.T.) -->
 <div class="modal-overlay" id="modalBolla">
   <div class="modal modal-lg">
     <div class="modal-header">
@@ -2258,14 +2260,14 @@
     <div class="modal-body">
       <div class="form-grid">
         <div class="form-group" id="groupNumeroBolla">
-          <label for="b_numero">N° Bolla <span class="req">*</span></label>
+          <label for="b_numero" id="labelNumeroBolla">N° Bolla <span class="req">*</span></label>
           <input type="text" id="b_numero" placeholder="es. BOL-2025-001">
         </div>
         <div class="form-group">
           <label for="b_data">Data <span class="req">*</span></label>
           <input type="date" id="b_data">
         </div>
-        <div class="form-group">
+        <div class="form-group" id="groupFornitoreBolla">
           <label for="b_fornitore_id">Fornitore</label>
           <select id="b_fornitore_id">
             <option value="">-- Seleziona fornitore --</option>
@@ -2277,13 +2279,104 @@
         </div>
       </div>
 
+      <!-- Campi obbligatori per un Documento Di Trasporto a norma di legge (DPR 472/1996):
+           destinatario, causale, aspetto/colli/peso, vettore, porto, data/ora inizio trasporto.
+           Visibili solo quando si sta creando/modificando un D.D.T. -->
+      <div id="ddtFieldsWrap" style="display:none;">
+        <div class="section-sep">Dati trasporto (D.D.T.)</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="ddt_cliente_id">Destinatario da anagrafica</label>
+            <select id="ddt_cliente_id" onchange="aggiornaDestinatarioDaCliente()">
+              <option value="">-- Nessuno / inserisci manualmente --</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="ddt_dest_ragione">Ragione sociale destinatario <span class="req">*</span></label>
+            <input type="text" id="ddt_dest_ragione" placeholder="Ragione sociale">
+          </div>
+          <div class="form-group">
+            <label for="ddt_dest_indirizzo">Indirizzo destinatario</label>
+            <input type="text" id="ddt_dest_indirizzo" placeholder="Via, città, CAP, prov.">
+          </div>
+          <div class="form-group">
+            <label for="ddt_dest_piva">P.IVA / C.F. destinatario</label>
+            <input type="text" id="ddt_dest_piva" placeholder="P.IVA o codice fiscale">
+          </div>
+          <div class="form-group">
+            <label for="ddt_causale">Causale del trasporto <span class="req">*</span></label>
+            <select id="ddt_causale">
+              <option value="Vendita">Vendita</option>
+              <option value="Reso">Reso</option>
+              <option value="Riparazione">Riparazione / conto lavorazione</option>
+              <option value="Comodato d'uso">Comodato d'uso</option>
+              <option value="Conto visione">Conto visione</option>
+              <option value="Altro">Altro (specificare nelle note)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="ddt_porto">Porto</label>
+            <select id="ddt_porto">
+              <option value="Franco">Franco</option>
+              <option value="Assegnato">Assegnato</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="ddt_mezzo">Trasporto a mezzo di</label>
+            <select id="ddt_mezzo" onchange="aggiornaCampiVettoreDDT()">
+              <option value="mittente">Mittente</option>
+              <option value="destinatario">Destinatario</option>
+              <option value="vettore">Vettore (terzi)</option>
+            </select>
+          </div>
+          <div class="form-group" id="ddt_vettore_wrap" style="display:none;">
+            <label for="ddt_vettore_ragione">Vettore (ragione sociale)</label>
+            <input type="text" id="ddt_vettore_ragione" placeholder="Ragione sociale vettore">
+          </div>
+          <div class="form-group">
+            <label for="ddt_aspetto">Aspetto esteriore dei beni</label>
+            <input type="text" id="ddt_aspetto" placeholder="es. Colli integri">
+          </div>
+          <div class="form-group">
+            <label for="ddt_colli">N° colli</label>
+            <input type="number" id="ddt_colli" min="1" step="1">
+          </div>
+          <div class="form-group">
+            <label for="ddt_peso">Peso lordo (kg)</label>
+            <input type="text" id="ddt_peso" placeholder="es. 5,5">
+          </div>
+          <div class="form-group">
+            <label for="ddt_ora_trasporto">Ora inizio trasporto</label>
+            <input type="time" id="ddt_ora_trasporto">
+          </div>
+        </div>
+      </div>
+
       <div class="section-sep">Articoli in bolla</div>
       <div id="bollaItemsContainer" class="parts-list"></div>
       <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="addBollaItemRow()">+ Aggiungi articolo</button>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('modalBolla')">Annulla</button>
+      <button class="btn btn-success" id="btnStampaDDT" onclick="apriAnteprimaDDT(_currentBollaId)" style="display:none;">🖨️ Stampa D.D.T.</button>
       <button class="btn btn-primary" onclick="salvaBolla()">Salva Bolla</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL ANTEPRIMA/STAMPA D.D.T. -->
+<div class="modal-overlay" id="modalAnteprimaDDT">
+  <div class="modal" style="max-width:900px;height:90vh;display:flex;flex-direction:column;">
+    <div class="modal-header">
+      <h3>🚚 Anteprima D.D.T. — <span id="anteprimaDDTTitolo"></span></h3>
+      <button class="modal-close" onclick="closeModal('modalAnteprimaDDT')">✕</button>
+    </div>
+    <div style="flex:1;padding:0;overflow:hidden;background:#f5f5f5;">
+      <iframe id="iframeAnteprimaDDT" style="width:100%;height:100%;border:none;background:#fff;"></iframe>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modalAnteprimaDDT')">Chiudi</button>
+      <button class="btn btn-primary" onclick="stampaIframeDDT()">🖨️ Stampa</button>
     </div>
   </div>
 </div>
@@ -3435,7 +3528,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.8.8 • 05 set 2026';
+const APP_VERSION = '2.9.0 • 05 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -11664,19 +11757,25 @@ function openBollaModal(tipo, id = null) {
   _currentBollaTipo = tipo;
   _currentBollaId = id;
   const b = id ? DB.bolle.find(x => x.id === id) : null;
+  const isDDT = tipo === 'ddt';
 
   const titEl = document.getElementById('modalBollaTitolo');
-  if (titEl) titEl.textContent = id ? `Modifica Bolla di ${tipo.toUpperCase()}` : `Nuova Bolla di ${tipo.toUpperCase()}`;
-    
+  if (titEl) titEl.textContent = isDDT
+    ? (id ? `Modifica D.D.T. ${b?.numero||''}` : 'Nuovo D.D.T.')
+    : (id ? `Modifica Bolla di ${tipo.toUpperCase()}` : `Nuova Bolla di ${tipo.toUpperCase()}`);
+
   const dEl = document.getElementById('b_data');
   if (dEl) dEl.value = b ? b.data : today();
-  
+
   const nEl = document.getElementById('b_note');
   if (nEl) nEl.value = b ? b.note : '';
-  
+
   const numEl = document.getElementById('b_numero');
-  if (numEl) numEl.value = b ? b.numero : '';
-  
+  if (numEl) numEl.value = b ? b.numero : (isDDT ? _prossimoNumeroDDT() : '');
+
+  const labelNum = document.getElementById('labelNumeroBolla');
+  if (labelNum) labelNum.innerHTML = isDDT ? 'N° D.D.T. <span class="req">*</span>' : 'N° Bolla <span class="req">*</span>';
+
   const selFor = document.getElementById('b_fornitore_id');
   if (selFor) {
     selFor.innerHTML = '<option value="">-- Seleziona fornitore --</option>' +
@@ -11684,10 +11783,41 @@ function openBollaModal(tipo, id = null) {
     if (b) selFor.value = b.fornitoreId || '';
     else selFor.value = '';
   }
-  
+  const gForn = document.getElementById('groupFornitoreBolla');
+  if (gForn) gForn.style.display = isDDT ? 'none' : '';
+
+  // Il numero è obbligatorio (a norma di legge) sia per il carico sia per il D.D.T.; per lo
+  // scarico interno resta facoltativo (auto-generato) come già era.
   const gNum = document.getElementById('groupNumeroBolla');
-  if (gNum) gNum.style.display = tipo === 'carico' ? 'block' : 'none';
-  
+  if (gNum) gNum.style.display = (tipo === 'carico' || isDDT) ? 'block' : 'none';
+
+  const ddtWrap = document.getElementById('ddtFieldsWrap');
+  if (ddtWrap) ddtWrap.style.display = isDDT ? 'block' : 'none';
+  if (isDDT) {
+    const selCl = document.getElementById('ddt_cliente_id');
+    if (selCl) {
+      selCl.innerHTML = '<option value="">-- Nessuno / inserisci manualmente --</option>' +
+        DB.clienti.map(c => `<option value="${c.id}">${escHtml(c.ragione)}</option>`).join('');
+      selCl.value = b?.destinatarioClienteId || '';
+    }
+    const dest = b?.destinatario || {};
+    document.getElementById('ddt_dest_ragione').value = dest.ragione || '';
+    document.getElementById('ddt_dest_indirizzo').value = dest.indirizzo || '';
+    document.getElementById('ddt_dest_piva').value = dest.piva || '';
+    document.getElementById('ddt_causale').value = b?.causaleTrasporto || 'Vendita';
+    document.getElementById('ddt_porto').value = b?.porto || 'Franco';
+    document.getElementById('ddt_mezzo').value = b?.trasportoAMezzoDi || 'mittente';
+    document.getElementById('ddt_vettore_ragione').value = b?.vettore?.ragione || '';
+    document.getElementById('ddt_aspetto').value = b?.aspettoBeni ?? 'Colli integri';
+    document.getElementById('ddt_colli').value = b?.numeroColli ?? 1;
+    document.getElementById('ddt_peso').value = b?.pesoLordo || '';
+    document.getElementById('ddt_ora_trasporto').value = b?.oraInizioTrasporto || new Date().toTimeString().slice(0,5);
+    aggiornaCampiVettoreDDT();
+  }
+
+  const btnStampa = document.getElementById('btnStampaDDT');
+  if (btnStampa) btnStampa.style.display = (isDDT && id) ? '' : 'none';
+
   const cont = document.getElementById('bollaItemsContainer');
   if (cont) {
     cont.innerHTML = '';
@@ -11695,6 +11825,36 @@ function openBollaModal(tipo, id = null) {
     else addBollaItemRow();
   }
   openModal('modalBolla');
+}
+
+// Precompila i campi destinatario del D.D.T. dai dati anagrafici del cliente scelto (restano
+// comunque modificabili: un DDT può avere un destinatario diverso dal cliente in scheda, es.
+// spedizione a un centro riparazioni del fornitore).
+function aggiornaDestinatarioDaCliente() {
+  const cid = parseInt(document.getElementById('ddt_cliente_id').value);
+  const cl = DB.clienti.find(c => c.id === cid);
+  if (!cl) return;
+  document.getElementById('ddt_dest_ragione').value = cl.ragione || '';
+  document.getElementById('ddt_dest_indirizzo').value = [cl.indirizzo, cl.citta, cl.cap, cl.prov].filter(Boolean).join(', ');
+  document.getElementById('ddt_dest_piva').value = cl.piva || '';
+}
+
+function aggiornaCampiVettoreDDT() {
+  const mezzo = document.getElementById('ddt_mezzo').value;
+  document.getElementById('ddt_vettore_wrap').style.display = mezzo === 'vettore' ? '' : 'none';
+}
+
+// Numerazione progressiva annuale del D.D.T. (obbligo di legge: numerazione progressiva e
+// non ripetibile nell'anno solare). Formato "<progressivo>/<AAAA>", proposto ma modificabile.
+function _prossimoNumeroDDT() {
+  const anno = new Date().getFullYear();
+  let max = 0;
+  DB.bolle.forEach(b => {
+    if (b.tipo !== 'ddt') return;
+    const m = String(b.numero||'').match(/^(\d+)\/(\d{4})$/);
+    if (m && parseInt(m[2], 10) === anno) max = Math.max(max, parseInt(m[1], 10));
+  });
+  return (max + 1) + '/' + anno;
 }
 
 function addBollaItemRow(data = {}) {
@@ -11801,9 +11961,37 @@ function _salvaBollaImpl() {
   const noteVal = document.getElementById('b_note')?.value.trim();
   const fVal = parseInt(document.getElementById('b_fornitore_id')?.value) || null;
   
+  const isDDT = _currentBollaTipo === 'ddt';
+
   if (!dVal) { mostraToast('Inserisci la data'); return; }
-  if (_currentBollaTipo === 'carico' && !nVal) { mostraToast('Inserisci il numero di bolla'); return; }
-  
+  if ((_currentBollaTipo === 'carico' || isDDT) && !nVal) { mostraToast(isDDT ? 'Inserisci il numero di D.D.T.' : 'Inserisci il numero di bolla'); return; }
+
+  // Campi obbligatori a norma di legge per un Documento Di Trasporto (DPR 472/1996):
+  // destinatario e causale del trasporto. Raccolti qui prima di toccare il magazzino, così
+  // un dato mancante interrompe il salvataggio senza aver già scaricato nulla.
+  let datiDDT = null;
+  if (isDDT) {
+    const destRagione = document.getElementById('ddt_dest_ragione').value.trim();
+    if (!destRagione) { mostraToast('Inserisci la ragione sociale del destinatario'); return; }
+    const mezzo = document.getElementById('ddt_mezzo').value;
+    datiDDT = {
+      destinatarioClienteId: parseInt(document.getElementById('ddt_cliente_id').value) || null,
+      destinatario: {
+        ragione: destRagione,
+        indirizzo: document.getElementById('ddt_dest_indirizzo').value.trim(),
+        piva: document.getElementById('ddt_dest_piva').value.trim()
+      },
+      causaleTrasporto: document.getElementById('ddt_causale').value,
+      porto: document.getElementById('ddt_porto').value,
+      trasportoAMezzoDi: mezzo,
+      vettore: mezzo === 'vettore' ? { ragione: document.getElementById('ddt_vettore_ragione').value.trim() } : null,
+      aspettoBeni: document.getElementById('ddt_aspetto').value.trim(),
+      numeroColli: parseInt(document.getElementById('ddt_colli').value) || 1,
+      pesoLordo: document.getElementById('ddt_peso').value.trim(),
+      oraInizioTrasporto: document.getElementById('ddt_ora_trasporto').value
+    };
+  }
+
   // Se è una modifica, prima facciamo l'"UNDO" dei movimenti vecchi
   if (_currentBollaId) {
     invertiMovimentiBolla(_currentBollaId);
@@ -11893,21 +12081,23 @@ function _salvaBollaImpl() {
     const b = DB.bolle.find(x => x.id === _currentBollaId);
     if (b) {
       b.data = dVal; b.numero = nVal || b.numero; b.note = noteVal; b.articoli = articoli; b.fornitoreId = fVal;
+      if (datiDDT) Object.assign(b, datiDDT);
     }
   } else {
     const bolla = {
       id: bId,
       tipo: _currentBollaTipo,
       numero: nVal || ('BOL-S-' + Date.now().toString().slice(-6)),
-      data: dVal, note: noteVal, articoli, fornitoreId: fVal, createdAt: today()
+      data: dVal, note: noteVal, articoli, fornitoreId: fVal, createdAt: today(),
+      ...(datiDDT || {})
     };
     DB.bolle.unshift(bolla);
   }
-  
+
   DB.save();
   closeModal('modalBolla');
   renderAll('bolle');
-  mostraToast('Bolla salvata correttamente.');
+  mostraToast(isDDT ? 'D.D.T. salvato correttamente.' : 'Bolla salvata correttamente.');
 }
 
 function cancellaBolla(id) {
@@ -11918,6 +12108,124 @@ function cancellaBolla(id) {
   closeModal('modalDetailBolla');
   renderAll('bolle');
   mostraToast('Bolla eliminata e magazzino ripristinato.');
+}
+
+// ======================== STAMPA D.D.T. ========================
+// Layout minimo di legge per un Documento Di Trasporto (DPR 472/1996): dati mittente
+// (l'intestazione aziendale già usata per il verbale PDF, riutilizzata qui come "mittente")
+// e destinatario, numero e data progressivi, causale del trasporto, descrizione/quantità dei
+// beni, aspetto esteriore/colli/peso, vettore, porto, data/ora inizio trasporto e righe firma.
+let _currentDDTId = null;
+
+function apriAnteprimaDDT(id) {
+  const b = DB.bolle.find(x => x.id === id);
+  if (!b || b.tipo !== 'ddt') return;
+  _currentDDTId = id;
+  document.getElementById('anteprimaDDTTitolo').textContent = b.numero || '';
+  openModal('modalAnteprimaDDT');
+  _renderAnteprimaDDTIframe();
+}
+
+function _renderAnteprimaDDTIframe() {
+  const b = DB.bolle.find(x => x.id === _currentDDTId);
+  if (!b) return;
+  const imp = getImpostazioni();
+  const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const mittenteLines = (imp.intestazione || '').split('\n').filter(Boolean);
+  const mittenteHtml = mittenteLines.length
+    ? mittenteLines.map(l => `<div>${esc(l)}</div>`).join('')
+    : '<div>Ragione sociale non impostata — vedi Impostazioni → Verbale PDF</div>';
+  const logoHtml = imp.logo ? `<img src="${imp.logo}" alt="logo">` : '';
+
+  const mezzoLabel = { mittente: 'Mittente', destinatario: 'Destinatario', vettore: 'Vettore (terzi)' }[b.trasportoAMezzoDi] || '—';
+
+  const righeArticoli = (b.articoli || []).map(a => `
+    <tr>
+      <td>${esc(a.codice)}</td>
+      <td>${esc(a.desc)}</td>
+      <td style="text-align:center;">${esc(a.qta)}</td>
+      <td style="text-align:center;">${esc((DB.ricambi.find(r => r.id === a.ricambioId)?.um) || 'pz')}</td>
+    </tr>`).join('');
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>D.D.T. ${esc(b.numero)}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; color: #111; margin: 0; padding: 24px; font-size: 12px; }
+  .header { display:flex; justify-content:space-between; align-items:flex-start; border-bottom: 2px solid #111; padding-bottom: 10px; margin-bottom: 18px; }
+  .header-left { display:flex; align-items:center; gap:12px; }
+  .header-left img { max-height: 55px; max-width: 140px; object-fit: contain; }
+  .mittente { font-size: 11px; line-height: 1.4; }
+  .doc-title { text-align:right; }
+  .doc-title h1 { font-size: 17px; margin:0 0 6px; letter-spacing: 0.02em; }
+  .doc-title .numero { font-size: 13px; font-weight:700; }
+  .doc-title .data { font-size: 11px; color:#444; margin-top:2px; }
+  .box { border:1px solid #999; border-radius:4px; padding:8px 10px; margin-bottom:12px; }
+  .box-title { font-size:9px; text-transform:uppercase; color:#666; margin-bottom:4px; font-weight:700; letter-spacing:0.04em; }
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  table { width:100%; border-collapse: collapse; margin: 4px 0 14px; }
+  th, td { border: 1px solid #999; padding: 6px 8px; font-size: 11px; text-align:left; }
+  th { background:#f0f0f0; text-transform:uppercase; font-size:9px; letter-spacing:0.03em; }
+  .riepilogo { display:flex; flex-wrap:wrap; gap:0 20px; margin: 4px 0 14px; font-size:11px; }
+  .riepilogo > div { flex:1; min-width:140px; margin-bottom:8px; }
+  .riepilogo .label { font-size:9px; color:#666; text-transform:uppercase; letter-spacing:0.03em; }
+  .firme { display:flex; justify-content:space-between; gap:20px; margin-top:50px; }
+  .firma-box { flex:1; text-align:center; font-size:10px; color:#555; }
+  .firma-linea { border-top:1px solid #333; margin-top:36px; padding-top:4px; }
+  .note-box { font-size:11px; margin-bottom:14px; }
+  @media print { body { padding: 8mm; } }
+</style></head><body>
+
+  <div class="header">
+    <div class="header-left">
+      ${logoHtml}
+      <div class="mittente">${mittenteHtml}</div>
+    </div>
+    <div class="doc-title">
+      <h1>DOCUMENTO DI TRASPORTO</h1>
+      <div class="numero">N° ${esc(b.numero)}</div>
+      <div class="data">del ${esc(fmtDate(b.data))}${b.oraInizioTrasporto ? ' — ore ' + esc(b.oraInizioTrasporto) : ''}</div>
+    </div>
+  </div>
+
+  <div class="box">
+    <div class="box-title">Destinatario</div>
+    <div><strong>${esc(b.destinatario?.ragione || '—')}</strong></div>
+    <div>${esc(b.destinatario?.indirizzo || '')}</div>
+    <div>${b.destinatario?.piva ? 'P.IVA/C.F. ' + esc(b.destinatario.piva) : ''}</div>
+  </div>
+
+  <table>
+    <thead><tr><th>Codice</th><th>Descrizione</th><th style="text-align:center;">Quantità</th><th style="text-align:center;">U.M.</th></tr></thead>
+    <tbody>${righeArticoli || '<tr><td colspan="4" style="text-align:center;color:#888;">Nessun articolo</td></tr>'}</tbody>
+  </table>
+
+  <div class="riepilogo">
+    <div><div class="label">Causale del trasporto</div>${esc(b.causaleTrasporto || '—')}</div>
+    <div><div class="label">Aspetto esteriore dei beni</div>${esc(b.aspettoBeni || '—')}</div>
+    <div><div class="label">N° colli</div>${esc(b.numeroColli || '—')}</div>
+    <div><div class="label">Peso lordo</div>${b.pesoLordo ? esc(b.pesoLordo) + ' kg' : '—'}</div>
+    <div><div class="label">Trasporto a mezzo di</div>${esc(mezzoLabel)}${b.vettore?.ragione ? ' — ' + esc(b.vettore.ragione) : ''}</div>
+    <div><div class="label">Porto</div>${esc(b.porto || '—')}</div>
+  </div>
+
+  ${b.note ? `<div class="note-box"><strong>Note:</strong> ${esc(b.note)}</div>` : ''}
+
+  <div class="firme">
+    <div class="firma-box"><div class="firma-linea">Firma del mittente</div></div>
+    <div class="firma-box"><div class="firma-linea">Firma del vettore</div></div>
+    <div class="firma-box"><div class="firma-linea">Firma del destinatario</div></div>
+  </div>
+
+</body></html>`;
+
+  document.getElementById('iframeAnteprimaDDT').srcdoc = html;
+}
+
+function stampaIframeDDT() {
+  const iframe = document.getElementById('iframeAnteprimaDDT');
+  if (iframe && iframe.contentWindow) iframe.contentWindow.print();
 }
 
 function invertiMovimentiBolla(id) {
@@ -12621,19 +12929,24 @@ function renderBolle() {
   }
   
   tb.innerHTML = list.map(b => {
-    const forn = b.fornitoreId ? (DB.fornitori.find(f => f.id === b.fornitoreId)?.ragione || '—') : '—';
+    const forn = b.tipo === 'ddt'
+      ? (b.destinatario?.ragione || '—')
+      : (b.fornitoreId ? (DB.fornitori.find(f => f.id === b.fornitoreId)?.ragione || '—') : '—');
     let badgeCls = 'badge-success';
     if (b.tipo === 'scarico') badgeCls = 'badge-danger';
+    if (b.tipo === 'ddt') badgeCls = 'badge-info';
     if (b.tipo === 'ordine') {
       badgeCls = b.stato === 'Completato' ? 'badge-completed' : (b.stato === 'Parziale' ? 'badge-warning' : 'badge-info');
     }
-    
+
     const clickFn = b.viewType === 'bolla' ? `viewDetailBolla(${b.id})` : `viewDetailOrdine(${b.id})`;
     const statoExtra = b.tipo === 'ordine' ? ` <span style="font-size:0.7rem; opacity:0.8;">(${escHtml(b.stato)}${b.ordinePadreNumero ? ' - Residuo' : ''})</span>` : '';
+    const stampaDDTIcon = b.tipo === 'ddt' ? `<button class="btn btn-ghost btn-sm btn-icon" onclick="apriAnteprimaDDT(${b.id})" title="Stampa D.D.T.">🖨️</button>` : '';
+    const tipoLabel = b.tipo === 'ddt' ? 'D.D.T.' : escHtml(b.tipo).toUpperCase();
 
     return `
     <tr>
-      <td><span class="badge ${badgeCls}">${escHtml(b.tipo).toUpperCase()}</span>${statoExtra}</td>
+      <td><span class="badge ${badgeCls}">${tipoLabel}</span>${statoExtra}</td>
       <td><strong style="cursor:pointer; color:var(--accent);" onclick="${clickFn}" title="Visualizza dettaglio">${b.numero ? escHtml(b.numero) : '—'}</strong></td>
       <td>${fmtDate(b.data)}</td>
       <td>${escHtml(forn)}</td>
@@ -12641,6 +12954,7 @@ function renderBolle() {
       <td>${b.note ? escHtml(b.note) : '—'}</td>
       <td>
         <div class="action-btns">
+           ${stampaDDTIcon}
            <button class="btn btn-ghost btn-sm btn-icon" onclick="${b.viewType === 'bolla' ? `openBollaModal('${b.tipo}', ${b.id})` : `openOrdineModal(${b.id})`}" title="Modifica">✏️</button>
            <button class="btn btn-ghost btn-sm btn-icon" onclick="${b.viewType === 'bolla' ? `cancellaBolla(${b.id})` : `cancellaOrdine(${b.id})`}" title="Elimina">🗑️</button>
         </div>
@@ -12652,22 +12966,38 @@ function renderBolle() {
 function viewDetailBolla(id) {
   const b = DB.bolle.find(x => x.id === id);
   if (!b) return;
-  
+  const isDDT = b.tipo === 'ddt';
+
   const forn = b.fornitoreId ? (DB.fornitori.find(f => f.id === b.fornitoreId)?.ragione || '—') : '—';
-  
-  document.getElementById('detailBollaTitolo').textContent = `Bolla di ${b.tipo.toUpperCase()} - ${b.numero}`;
+
+  document.getElementById('detailBollaTitolo').textContent = isDDT ? `D.D.T. ${b.numero}` : `Bolla di ${b.tipo.toUpperCase()} - ${b.numero}`;
+
+  const datiTrasportoHtml = isDDT ? `
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:15px; padding:12px; background:var(--surface2); border-radius:8px;">
+      <div><strong>Destinatario:</strong> ${escHtml(b.destinatario?.ragione || '—')}</div>
+      <div><strong>P.IVA/C.F. destinatario:</strong> ${escHtml(b.destinatario?.piva || '—')}</div>
+      <div style="grid-column: span 2;"><strong>Indirizzo destinatario:</strong> ${escHtml(b.destinatario?.indirizzo || '—')}</div>
+      <div><strong>Causale trasporto:</strong> ${escHtml(b.causaleTrasporto || '—')}</div>
+      <div><strong>Porto:</strong> ${escHtml(b.porto || '—')}</div>
+      <div><strong>Trasporto a mezzo di:</strong> ${escHtml({mittente:'Mittente',destinatario:'Destinatario',vettore:'Vettore'}[b.trasportoAMezzoDi] || '—')}${b.vettore?.ragione ? ' — ' + escHtml(b.vettore.ragione) : ''}</div>
+      <div><strong>Colli / Peso:</strong> ${escHtml(b.numeroColli || '—')} — ${escHtml(b.pesoLordo || '—')} kg</div>
+      <div style="grid-column: span 2;"><strong>Aspetto esteriore beni:</strong> ${escHtml(b.aspettoBeni || '—')}</div>
+    </div>` : '';
+
   document.getElementById('detailBollaBody').innerHTML = `
     <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:15px;">
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
         <div><strong>Data:</strong> ${fmtDate(b.data)}</div>
-        <div><strong>Fornitore:</strong> ${escHtml(forn)}</div>
+        <div><strong>${isDDT ? 'Ora inizio trasporto' : 'Fornitore'}:</strong> ${isDDT ? escHtml(b.oraInizioTrasporto || '—') : escHtml(forn)}</div>
         <div style="grid-column: span 2;"><strong>Note:</strong> ${b.note ? escHtml(b.note) : 'Nessuna'}</div>
       </div>
       <div style="display:flex; gap:8px;">
+        ${isDDT ? `<button class="btn btn-success btn-sm" onclick="apriAnteprimaDDT(${b.id})">🖨️ Stampa</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="closeModal('modalDetailBolla'); openBollaModal('${b.tipo}', ${b.id})">✏️ Modifica</button>
         <button class="btn btn-outline-danger btn-sm" onclick="cancellaBolla(${b.id})">🗑️ Elimina</button>
       </div>
     </div>
+    ${datiTrasportoHtml}
     <table class="table" style="width:100%;">
       <thead>
         <tr style="background:var(--surface2);">
