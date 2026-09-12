@@ -1,0 +1,62 @@
+{
+  "name": "assbio-ivd",
+  "productName": "Assistenza Tecnica IVD",
+  "version": "2.9.4",
+  "description": "Gestionale per assistenza tecnica IVD: clienti, interventi, appuntamenti, ricambi, bolle e D.D.T.",
+  "main": "main.js",
+  "author": "Fioravante Capaccio",
+  "license": "UNLICENSED",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FioreCapaccio/AssBio.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:all": "electron-builder -mw"
+  },
+  "devDependencies": {
+    "electron": "^32.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.fioravantecapaccio.assbioivd",
+    "productName": "Assistenza Tecnica IVD",
+    "copyright": "Copyright © 2026 Fioravante Capaccio",
+    "files": [
+      "main.js",
+      "index.html",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist_electron"
+    },
+    "mac": {
+      "category": "public.app-category.business",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ]
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "FioreCapaccio",
+      "repo": "AssBio",
+      "releaseType": "draft"
+    }
+  }
+}

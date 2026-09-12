@@ -1,0 +1,16 @@
+# Dipendenze e build
+node_modules/
+dist_electron/
+dist/
+build/
+
+# Backup dati utente — non vanno versionati (dati reali dei clienti)
+IVD_Backup_*.json
+
+# File di sistema
+.DS_Store
+Thumbs.db
+
+# Log
+npm-debug.log*
+*.log

@@ -1,0 +1,63 @@
+name: Build desktop app
+
+# Si avvia in due casi:
+#  - push di un tag "v*" (es. v2.9.4) -> compila Windows e macOS e li allega come bozza di
+#    Release su GitHub (electron-builder pubblica direttamente, vedi "publish" in package.json)
+#  - avvio manuale da GitHub (tab Actions -> Build desktop app -> Run workflow) -> compila
+#    e carica gli installer come artifact scaricabili, senza creare/toccare alcuna release
+#    (nessun tag presente in quel caso, electron-builder non tenta la pubblicazione)
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Il GITHUB_TOKEN generato per ogni run ha di default il solo permesso "contents: read":
+# senza questo blocco, electron-builder riceve un 403 ("Resource not accessible by
+# integration") quando prova a creare la release sul tag.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Necessario a electron-builder per creare/aggiornare la release quando il job parte
+      # da un tag v*. I due job (mac e windows) allegano ciascuno i propri installer alla
+      # STESSA release (electron-builder la trova già esistente per quel tag e la aggiorna
+      # invece di duplicarla) — comportamento nativo e già gestito internamente.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Installa dipendenze
+        run: npm install
+
+      - name: Build macOS (.dmg/.zip)
+        if: matrix.os == 'macos-latest'
+        run: npm run dist:mac
+
+      - name: Build Windows (.exe)
+        if: matrix.os == 'windows-latest'
+        run: npm run dist:win
+
+      - name: Carica artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.os }}
+          path: |
+            dist_electron/*.dmg
+            dist_electron/*.zip
+            dist_electron/*.exe
+            dist_electron/*.blockmap
+          if-no-files-found: error
