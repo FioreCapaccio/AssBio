@@ -4,7 +4,7 @@ const path = require('path');
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
-    height: 900,
+    height: 1170, // +30% rispetto ai 900px originali
     minWidth: 1024,
     minHeight: 700,
     title: 'Assistenza Tecnica IVD',

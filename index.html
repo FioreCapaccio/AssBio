@@ -98,6 +98,19 @@
     .header-subtitle { font-size: 0.7rem; color: var(--text-muted); font-weight: 400; margin-top: 0; }
     .header-right { display: flex; align-items: center; gap: 12px; }
 
+    #btnChiudiApp {
+      background: rgba(255, 59, 48, 0.12);
+      color: #d70015;
+      border: 1px solid rgba(255, 59, 48, 0.3);
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #btnChiudiApp:hover { background: rgba(255, 59, 48, 0.22); }
+
     .search-global-wrap { position: relative; margin-right: 12px; width: 280px; }
     .search-global-wrap input {
       background: rgba(255, 255, 255, 0.7);
@@ -899,6 +912,7 @@
       <input type="text" id="universalSearch" placeholder="Cerca cliente, intervento, ricambio..." oninput="handleUniversalSearch(this.value)">
     </div>
     <span id="hdrDate" style="font-size: 0.85rem; font-weight: 500; opacity: 0.8;"></span>
+    <button id="btnChiudiApp" onclick="chiudiApplicazioneDesktop()" title="Chiudi l'applicazione" style="display:none;">✕ Chiudi</button>
   </div>
 </header>
 
@@ -3573,7 +3587,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.9.5 • 12 set 2026';
+const APP_VERSION = '2.9.6 • 12 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4281,6 +4295,14 @@ function initHScrollHints() {
   setInterval(() => _hScrollRegistry.forEach(fn => fn()), 800);
 }
 
+// Chiude la finestra dell'app desktop (Electron intercetta la window.close() standard del
+// DOM e chiude la BrowserWindow, senza bisogno di IPC/preload dedicati).
+function chiudiApplicazioneDesktop() {
+  if (confirm('Chiudere Assistenza Tecnica IVD?')) {
+    window.close();
+  }
+}
+
 // ======================== INIT ========================
 document.addEventListener('DOMContentLoaded', () => {
  // BUG FIX: prima solo SUPABASE.init() aveva un try/catch dedicato — un errore imprevisto
@@ -4290,6 +4312,15 @@ document.addEventListener('DOMContentLoaded', () => {
  try {
   const _vBadge = document.getElementById('appVersionBadge');
   if (_vBadge) _vBadge.textContent = 'v' + APP_VERSION;
+
+  // Il tasto "Chiudi" ha senso solo dentro l'app desktop Electron (window.close() in un
+  // normale browser non funziona su una scheda aperta dall'utente): lo mostriamo solo se
+  // rileviamo Electron dallo user agent.
+  if (/Electron\//.test(navigator.userAgent)) {
+    const _btnChiudi = document.getElementById('btnChiudiApp');
+    if (_btnChiudi) _btnChiudi.style.display = '';
+  }
+
   DB.load();
   _caricaImpostazioni();
   
