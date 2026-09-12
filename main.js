@@ -8,6 +8,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 700,
     title: 'Assistenza Tecnica IVD',
+    icon: path.join(__dirname, 'build', 'icon.png'),
     backgroundColor: '#f5f5f7',
     webPreferences: {
       contextIsolation: true,

@@ -29,7 +29,8 @@
     "files": [
       "main.js",
       "index.html",
-      "package.json"
+      "package.json",
+      "build/icon.png"
     ],
     "directories": {
       "output": "dist_electron"
