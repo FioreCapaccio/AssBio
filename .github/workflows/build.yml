@@ -63,7 +63,7 @@ jobs:
             dist_electron/*.zip
             dist_electron/*.exe
             dist_electron/*.blockmap
-            dist_electron/*.yml
+            dist_electron/latest*.yml
           if-no-files-found: error
 
   release:
