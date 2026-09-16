@@ -2203,7 +2203,7 @@
           <input type="text" id="app_cliente_search" placeholder="🔍 Cerca cliente..." autocomplete="off"
                  oninput="cercaClienteAppuntamento(this)" onclick="mostraDropdownClienteAppuntamento(this)">
           <input type="hidden" id="app_cliente">
-          <div id="app_cliente_dropdown" class="part-dropdown" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:200px; overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:6px; z-index:100; box-shadow:var(--shadow);"></div>
+          <div id="app_cliente_dropdown" class="part-dropdown" onclick="this.style.display='none'" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:200px; overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:6px; z-index:100; box-shadow:var(--shadow);"></div>
         </div>
         <div class="form-group">
           <label for="app_tecnico">Tecnico assegnato</label>
@@ -3587,7 +3587,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.9.6 • 12 set 2026';
+const APP_VERSION = '2.9.7 • 16 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -7261,9 +7261,16 @@ function eliminaCliente(id) {
   const cl = DB.clienti.find(c => c.id === id);
   if (!cl) return;
   const interventiAssociati = DB.interventi.filter(i => i.clienteId === id);
+  // BUG FIX: venivano cascade-eliminati solo gli interventi — gli appuntamenti dello stesso
+  // cliente restavano nell'agenda con un clienteId ormai orfano, mostrando "N/D" al posto
+  // del nome (strumento/matricola restano visibili perché salvati sull'appuntamento stesso).
+  const appuntamentiAssociati = (DB.appuntamenti || []).filter(a => a.clienteId === id);
   let msg = `Eliminare il cliente "${cl.ragione || cl.nome || '?'}"?`;
   if (interventiAssociati.length > 0) {
     msg += `\n\nCi sono ${interventiAssociati.length} intervento/i associati. Verranno eliminati e le giacenze dei ricambi usati verranno ripristinate.`;
+  }
+  if (appuntamentiAssociati.length > 0) {
+    msg += `\n\nCi sono ${appuntamentiAssociati.length} appuntamento/i associato/i. Verranno eliminati anch'essi.`;
   }
   if (!confirm(msg)) return;
 
@@ -7275,14 +7282,16 @@ function eliminaCliente(id) {
     });
   });
 
-  // Rimuovi interventi associati
+  // Rimuovi interventi e appuntamenti associati
   const idsDaRimuovere = new Set(interventiAssociati.map(i => i.id));
   DB.interventi = DB.interventi.filter(i => !idsDaRimuovere.has(i.id));
+  const idsAppDaRimuovere = new Set(appuntamentiAssociati.map(a => a.id));
+  DB.appuntamenti = (DB.appuntamenti || []).filter(a => !idsAppDaRimuovere.has(a.id));
   DB.clienti = DB.clienti.filter(c => c.id !== id);
   DB.save();
   renderAll();
-  mostraToast(`Cliente eliminato con ${interventiAssociati.length} interventi rimossi.`, 'info');
-  DB.auditLog('delete', 'cliente', id, `Eliminato ${cl.ragione || cl.nome} con ${interventiAssociati.length} interventi`);
+  mostraToast(`Cliente eliminato con ${interventiAssociati.length} interventi e ${appuntamentiAssociati.length} appuntamenti rimossi.`, 'info');
+  DB.auditLog('delete', 'cliente', id, `Eliminato ${cl.ragione || cl.nome} con ${interventiAssociati.length} interventi e ${appuntamentiAssociati.length} appuntamenti`);
 }
 
 function renderFirmeCliente(cliente) {
@@ -7871,7 +7880,7 @@ function addPartRow(data = {}) {
         <input type="text" class="part-search form-control" placeholder="🔍 Cerca ricambio (codice o descrizione)..."
                value="${data.ricambioId ? escRaw(getRicambioLabel(data.ricambioId)) : ''}"
                oninput="cercaRicambiPart(this)" onclick="mostraDropdownRicambi(this)" autocomplete="off">
-        <div class="part-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;max-height:200px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:6px;z-index:100;box-shadow:var(--shadow);">
+        <div class="part-dropdown" onclick="this.style.display='none'" style="display:none;position:absolute;top:100%;left:0;right:0;max-height:200px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:6px;z-index:100;box-shadow:var(--shadow);">
           ${buildRicambiDropdownOptions()}
         </div>
         <input type="hidden" class="part-select" value="${data.ricambioId || ''}">
@@ -10536,27 +10545,36 @@ function eseguiSvuotaPerFornitore() {
 }
 
 function pulisciClientiSenzaStrumenti() {
+  // BUG FIX: la protezione controllava solo DB.interventi — un cliente con appuntamenti
+  // in programma ma ancora senza interventi/strumenti veniva cancellato comunque, lasciando
+  // gli appuntamenti orfani (clienteId punta a un cliente ormai eliminato): in agenda il
+  // nome cliente diventa "N/D" mentre strumento/matricola restano visibili perché salvati
+  // direttamente sull'appuntamento, non recuperati dal cliente.
   const clientConInterventi = new Set(
     (DB.interventi || []).filter(i => i.clienteId).map(i => i.clienteId)
   );
+  const clientConAppuntamenti = new Set(
+    (DB.appuntamenti || []).filter(a => a.clienteId).map(a => a.clienteId)
+  );
+  const clientProtetti = new Set([...clientConInterventi, ...clientConAppuntamenti]);
   const daRimuovere = DB.clienti.filter(c =>
     (!c.strumentiInstallati || c.strumentiInstallati.length === 0) &&
-    !clientConInterventi.has(c.id)
+    !clientProtetti.has(c.id)
   );
 
   if (daRimuovere.length === 0) {
-    mostraToast('Non sono stati trovati clienti senza strumenti associati (escludendo quelli con interventi).', 'info');
+    mostraToast('Non sono stati trovati clienti senza strumenti associati (escludendo quelli con interventi o appuntamenti).', 'info');
     return;
   }
 
   const protetti = DB.clienti.filter(c =>
     (!c.strumentiInstallati || c.strumentiInstallati.length === 0) &&
-    clientConInterventi.has(c.id)
+    clientProtetti.has(c.id)
   );
 
   let msg = `Trovati ${daRimuovere.length} clienti senza strumenti (probabili doppioni).`;
   if (protetti.length > 0) {
-    msg += `\n\n⚠️ ${protetti.length} cliente/i senza strumenti saranno PRESERVATI perché hanno interventi associati.`;
+    msg += `\n\n⚠️ ${protetti.length} cliente/i senza strumenti saranno PRESERVATI perché hanno interventi o appuntamenti associati.`;
   }
   msg += `\n\nEsempi:\n${daRimuovere.slice(0,3).map(c => '• ' + (c.ragione || c.nome || '?')).join('\n')}\n\nVuoi procedere con la cancellazione definitiva?`;
 
@@ -10788,6 +10806,7 @@ function analizzaIntegritaDati() {
     interventiClienteOrfano: [],
     interventiFornitoreOrfano: [],
     interventiPartiOrfane: [],
+    appuntamentiClienteOrfano: [],
     bolleFornitoreOrfano: [],
     bolleArticoliOrfani: [],
     ordiniFornitoreOrfano: []
@@ -10802,6 +10821,14 @@ function analizzaIntegritaDati() {
       if (p.ricambioId && !DB.ricambi.find(r => r.id === p.ricambioId))
         issues.interventiPartiOrfane.push({ id: i.id, numero: i.numero || ('#' + i.id), ricambioId: p.ricambioId });
     });
+  });
+  // BUG FIX: gli appuntamenti con un clienteId orfano (es. cliente eliminato da "Pulisci
+  // clienti senza strumenti", che prima non li considerava) non venivano mai segnalati qui —
+  // restavano invisibili all'analisi di integrità, mostrando "N/D" in agenda senza modo di
+  // individuarli o ripulirli dal pannello dedicato.
+  (DB.appuntamenti || []).forEach(a => {
+    if (a.clienteId && !DB.clienti.find(c => c.id === a.clienteId))
+      issues.appuntamentiClienteOrfano.push({ id: a.id, numero: '#' + a.id + (a.data ? ' — ' + a.data : ''), clienteId: a.clienteId });
   });
   DB.bolle.forEach(b => {
     if (b.fornitoreId && !DB.fornitori.find(f => f.id === b.fornitoreId))
@@ -10847,6 +10874,7 @@ function _renderReportIntegritaDati() {
   riga('Interventi con cliente inesistente', issues.interventiClienteOrfano, x => `cliente #${x.clienteId} non trovato`);
   riga('Interventi con fornitore inesistente', issues.interventiFornitoreOrfano, x => `fornitore #${x.fornitoreId} non trovato`);
   riga('Interventi con ricambio usato inesistente', issues.interventiPartiOrfane, x => `ricambio #${x.ricambioId} non trovato`);
+  riga('Appuntamenti con cliente inesistente', issues.appuntamentiClienteOrfano, x => `cliente #${x.clienteId} non trovato`);
   riga('Bolle con fornitore inesistente', issues.bolleFornitoreOrfano, x => `fornitore #${x.fornitoreId} non trovato`);
   riga('Bolle con articolo inesistente', issues.bolleArticoliOrfani, x => `ricambio #${x.ricambioId} non trovato`);
   riga('Ordini con fornitore inesistente', issues.ordiniFornitoreOrfano, x => `fornitore #${x.fornitoreId} non trovato`);
@@ -10874,6 +10902,10 @@ function eseguiPuliziaDatiIncoerenti() {
   issues.interventiClienteOrfano.forEach(x => {
     const i = DB.interventi.find(r => r.id === x.id);
     if (i) i.clienteId = null;
+  });
+  issues.appuntamentiClienteOrfano.forEach(x => {
+    const a = (DB.appuntamenti || []).find(r => r.id === x.id);
+    if (a) a.clienteId = null;
   });
   issues.interventiFornitoreOrfano.forEach(x => {
     const i = DB.interventi.find(r => r.id === x.id);
@@ -12068,7 +12100,7 @@ function addBollaItemRow(data = {}) {
         <input type="text" class="item-search form-control" placeholder="🔍 Cerca articolo..."
                oninput="cercaRicambiBolla(this)" onclick="mostraDropdownRicambiBolla(this)"
                value="${escRaw(searchVal)}" autocomplete="off">
-        <div class="part-dropdown" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:200px; overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:6px; z-index:100; box-shadow:var(--shadow);">
+        <div class="part-dropdown" onclick="this.style.display='none'" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:200px; overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:6px; z-index:100; box-shadow:var(--shadow);">
         </div>
         <input type="hidden" class="item-id" value="${data.ricambioId||''}">
       </div>
@@ -12596,7 +12628,7 @@ function addOrdineItemRow(data = {}) {
         <input type="text" class="item-search form-control" placeholder="🔍 Cerca articolo..."
                oninput="cercaRicambiOrdine(this)" onclick="mostraDropdownRicambiOrdine(this)"
                value="${escRaw(searchVal)}" autocomplete="off">
-        <div class="part-dropdown" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:200px; overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:6px; z-index:100; box-shadow:var(--shadow);">
+        <div class="part-dropdown" onclick="this.style.display='none'" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:200px; overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:6px; z-index:100; box-shadow:var(--shadow);">
         </div>
         <input type="hidden" class="item-id" value="${data.ricambioId||''}">
       </div>
