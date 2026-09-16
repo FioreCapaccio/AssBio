@@ -1,11 +1,11 @@
 name: Build desktop app
 
 # Si avvia in due casi:
-#  - push di un tag "v*" (es. v2.9.4) -> compila Windows e macOS e li allega come bozza di
-#    Release su GitHub (electron-builder pubblica direttamente, vedi "publish" in package.json)
+#  - push di un tag "v*" (es. v2.9.4) -> compila Windows e macOS, poi un job separato
+#    pubblica UNA sola bozza di Release su GitHub con tutti gli installer
 #  - avvio manuale da GitHub (tab Actions -> Build desktop app -> Run workflow) -> compila
 #    e carica gli installer come artifact scaricabili, senza creare/toccare alcuna release
-#    (nessun tag presente in quel caso, electron-builder non tenta la pubblicazione)
+#    (il job "release" gira solo su push di tag, vedi "if" più sotto)
 on:
   push:
     tags:
@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 # Il GITHUB_TOKEN generato per ogni run ha di default il solo permesso "contents: read":
-# senza questo blocco, electron-builder riceve un 403 ("Resource not accessible by
+# senza questo blocco, il job "release" riceve un 403 ("Resource not accessible by
 # integration") quando prova a creare la release sul tag.
 permissions:
   contents: write
@@ -25,12 +25,6 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      # Necessario a electron-builder per creare/aggiornare la release quando il job parte
-      # da un tag v*. I due job (mac e windows) allegano ciascuno i propri installer alla
-      # STESSA release (electron-builder la trova già esistente per quel tag e la aggiorna
-      # invece di duplicarla) — comportamento nativo e già gestito internamente.
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,13 +37,22 @@ jobs:
       - name: Installa dipendenze
         run: npm install
 
+      # BUG FIX: entrambi i job (mac e windows) giravano in parallelo e ciascuno provava a
+      # pubblicare DIRETTAMENTE su GitHub (electron-builder pubblica in automatico quando
+      # trova un tag v* e un GH_TOKEN, per via del blocco "publish" in package.json). I due
+      # job non si accorgevano l'uno dell'altro: capitava che entrambi non trovassero ancora
+      # nessuna release per quel tag e la creassero CIASCUNO per conto proprio, risultando
+      # in due bozze duplicate — una con i soli asset Mac, una con i soli asset Windows
+      # (osservato realmente su v2.9.8). Ora ogni job si limita a compilare ("--publish
+      # never", nessun GH_TOKEN necessario qui) e carica il risultato come artifact; la
+      # pubblicazione vera e propria avviene una sola volta, nel job "release" qui sotto.
       - name: Build macOS (.dmg/.zip)
         if: matrix.os == 'macos-latest'
-        run: npm run dist:mac
+        run: npm run dist:mac -- --publish never
 
       - name: Build Windows (.exe)
         if: matrix.os == 'windows-latest'
-        run: npm run dist:win
+        run: npm run dist:win -- --publish never
 
       - name: Carica artifact
         uses: actions/upload-artifact@v4
@@ -60,4 +63,31 @@ jobs:
             dist_electron/*.zip
             dist_electron/*.exe
             dist_electron/*.blockmap
+            dist_electron/*.yml
           if-no-files-found: error
+
+  release:
+    # Solo su push di un tag v* — un run manuale (workflow_dispatch) si ferma al job "build"
+    # e lascia solo gli artifact scaricabili, senza toccare alcuna Release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Scarica gli installer di entrambe le piattaforme
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: dist_electron
+          merge-multiple: true
+
+      - name: Pubblica un'unica bozza di release con tutti gli installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist_electron/* \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --draft \
+            --generate-notes
