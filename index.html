@@ -2029,9 +2029,12 @@
         <div id="i_cerca_seriale_results" style="display:none;position:absolute;z-index:200;background:var(--surface);border:1.5px solid var(--accent);border-radius:8px;box-shadow:0 4px 18px rgba(0,0,0,0.18);max-height:220px;overflow-y:auto;min-width:340px;"></div>
       </div>
       <div class="form-grid">
-        <div class="form-group">
-          <label for="i_cliente">Cliente <span class="req">*</span></label>
-          <select id="i_cliente" onchange="aggiornaStrumentiCliente()"></select>
+        <div class="form-group" style="position:relative;">
+          <label for="i_cliente_search">Cliente <span class="req">*</span></label>
+          <input type="text" id="i_cliente_search" placeholder="🔍 Cerca cliente..." autocomplete="off"
+                 oninput="cercaClienteIntervento(this)" onclick="mostraDropdownClienteIntervento(this)">
+          <input type="hidden" id="i_cliente">
+          <div id="i_cliente_dropdown" class="part-dropdown" onclick="this.style.display='none'" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:200px; overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:6px; z-index:100; box-shadow:var(--shadow);"></div>
         </div>
         <div class="form-group">
           <label for="i_strumento">Strumento / Apparecchiatura <span class="req">*</span></label>
@@ -3587,7 +3590,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.9.7 • 16 set 2026';
+const APP_VERSION = '2.9.8 • 16 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -7031,6 +7034,7 @@ function _nuovoInterventoStrumento(clienteId, modello, seriale) {
   openInterventoModal(null);
   requestAnimationFrame(() => {
     document.getElementById('i_cliente').value = clienteId;
+    _sincronizzaTestoClienteIntervento();
     aggiornaStrumentiCliente();
     document.getElementById('i_strumento').value = modello;
     document.getElementById('i_seriale').value = seriale;
@@ -7101,6 +7105,7 @@ function nuovoInterventoPerCliente(clienteId) {
   // Pre-compila cliente e strumenti dopo l'apertura del modal
   requestAnimationFrame(() => {
     document.getElementById('i_cliente').value = clienteId;
+    _sincronizzaTestoClienteIntervento();
     aggiornaStrumentiCliente();
     calcolaImportoIntervento();
   });
@@ -7511,10 +7516,8 @@ function openInterventoModal(id = null) {
     actWrap.innerHTML = id ? `<button class="btn btn-outline-danger btn-sm" onclick="closeModal('modalIntervento'); eliminaIntervento(${id})">🗑️ Elimina</button>` : '';
   }
 
-  // Popola select clienti
-  const selCl = document.getElementById('i_cliente');
-  selCl.innerHTML = '<option value="">-- Seleziona cliente --</option>' +
-    DB.clienti.map(c => `<option value="${c.id}">${escHtml(c.ragione)}</option>`).join('');
+  // Il campo Cliente è una combobox di ricerca (i_cliente_search + i_cliente nascosto), non
+  // più un <select> da popolare: la tendina viene costruita al volo in base a quanto digitato.
 
   // Popola select fornitori
   const selFor = document.getElementById('i_fornitore_id');
@@ -7532,6 +7535,7 @@ function openInterventoModal(id = null) {
     document.getElementById('i_stato').value = i.stato||'Aperto';
     document.getElementById('i_priorita').value = i.priorita||'Media';
     document.getElementById('i_cliente').value = i.clienteId||'';
+    _sincronizzaTestoClienteIntervento();
     document.getElementById('i_strumento').value = i.strumento||'';
     document.getElementById('i_seriale').value = i.seriale||'';
     document.getElementById('i_tipo').value = i.tipo||'';
@@ -7569,6 +7573,7 @@ function openInterventoModal(id = null) {
     document.getElementById('i_stato').value = 'Aperto';
     document.getElementById('i_priorita').value = 'Media';
     document.getElementById('i_cliente').value = '';
+    _sincronizzaTestoClienteIntervento();
     document.getElementById('i_strumento').value = '';
     document.getElementById('i_seriale').value = '';
     document.getElementById('i_tipo').value = '';
@@ -7755,6 +7760,7 @@ function cercaPerSerialeField() {
 
 function _selezionaStrumento(clienteId, modello, seriale, fornitoreId, dropId) {
   document.getElementById('i_cliente').value = clienteId;
+  _sincronizzaTestoClienteIntervento();
   aggiornaStrumentiCliente();
   document.getElementById('i_strumento').value = modello;
   document.getElementById('i_seriale').value = seriale;
@@ -8524,6 +8530,64 @@ if (!window._clienteAppDropdownCloserInstalled) {
   });
 }
 
+// BUG FIX: il campo Cliente della scheda Intervento era un <select> nativo, popolato con
+// TUTTI i clienti — la ricerca digitando funzionava solo con il "type-ahead" del browser,
+// che confronta solo l'INIZIO del testo dell'opzione: digitando un nome parziale che non
+// corrisponde all'inizio della ragione sociale (es. una parola nel mezzo del nome) non
+// trovava nulla, mentre aprendo la tendina si vedevano comunque tutti i clienti senza alcun
+// filtro. Sostituito con la stessa combobox di ricerca (per sottostringa, case-insensitive)
+// già usata in Appuntamenti.
+function cercaClienteIntervento(input) {
+  const dropdown = document.getElementById('i_cliente_dropdown');
+  dropdown.innerHTML = _buildClienteDropdownOptionsIntervento(input.value.trim());
+  dropdown.style.display = 'block';
+  // Se l'utente cancella/modifica il testo, il cliente selezionato in precedenza non è più
+  // valido finché non ne sceglie uno nuovo dalla tendina.
+  document.getElementById('i_cliente').value = '';
+}
+
+function mostraDropdownClienteIntervento(input) {
+  const dropdown = document.getElementById('i_cliente_dropdown');
+  dropdown.innerHTML = _buildClienteDropdownOptionsIntervento(input.value.trim());
+  dropdown.style.display = 'block';
+}
+
+function _buildClienteDropdownOptionsIntervento(filtro) {
+  const f = filtro.toLowerCase();
+  const list = DB.clienti.filter(c => !f || String(c.ragione||'').toLowerCase().includes(f)).slice(0, 50);
+  if (!list.length) return '<div style="padding:10px; text-align:center; color:var(--text-muted);">Nessun risultato</div>';
+  return list.map(c => `<div style="padding:8px 12px; cursor:pointer; border-bottom:1px solid var(--border-light);" onclick="selezionaClienteIntervento(${c.id})">${escHtml(c.ragione)}</div>`).join('');
+}
+
+function selezionaClienteIntervento(id) {
+  const cl = DB.clienti.find(c => c.id === id);
+  if (!cl) return;
+  document.getElementById('i_cliente').value = id;
+  document.getElementById('i_cliente_search').value = cl.ragione;
+  document.getElementById('i_cliente_dropdown').style.display = 'none';
+  aggiornaStrumentiCliente();
+}
+
+// Tiene sincronizzato il campo di testo visibile con il cliente effettivamente selezionato
+// (id salvato nel campo nascosto i_cliente), per tutti i punti del codice che impostano
+// i_cliente.value via JS invece che tramite selezione manuale dalla tendina.
+function _sincronizzaTestoClienteIntervento() {
+  const id = parseInt(document.getElementById('i_cliente')?.value);
+  const cl = id ? DB.clienti.find(c => c.id === id) : null;
+  const search = document.getElementById('i_cliente_search');
+  if (search) search.value = cl ? cl.ragione : '';
+}
+
+if (!window._clienteIvDropdownCloserInstalled) {
+  window._clienteIvDropdownCloserInstalled = true;
+  document.addEventListener('click', (e) => {
+    const dropdown = document.getElementById('i_cliente_dropdown');
+    if (!dropdown) return;
+    const wrap = dropdown.closest('.form-group');
+    if (wrap && !wrap.contains(e.target)) dropdown.style.display = 'none';
+  });
+}
+
 // Normalizza gli strumenti di un appuntamento in [{modello, seriale, numeroChiamata,
 // interventoId}], leggendo il nuovo campo array a.strumenti se presente, altrimenti gli
 // storici a.strumento/a.seriale/a.interventoId singoli (appuntamenti creati prima
@@ -8753,6 +8817,7 @@ function _apriProssimoInterventoDaCoda() {
 
   openInterventoModal();
   document.getElementById('i_cliente').value = a.clienteId || '';
+  _sincronizzaTestoClienteIntervento();
   aggiornaStrumentiCliente();
   document.getElementById('i_strumento').value = prossimo.modello || '';
   document.getElementById('i_seriale').value = prossimo.seriale || '';
@@ -15257,6 +15322,7 @@ async function createInterventoFromMerck() {
 
   if (clienteTrovato) {
     setV('i_cliente', String(clienteTrovato.id));
+    if (typeof _sincronizzaTestoClienteIntervento === 'function') _sincronizzaTestoClienteIntervento();
     if (typeof aggiornaStrumentiCliente === 'function') aggiornaStrumentiCliente();
     const sExt = serialeEstratto.toLowerCase();
     const strum = clienteTrovato.strumentiInstallati.find(s => sExt.includes(String(s.seriale).toLowerCase()) || String(s.seriale).toLowerCase().includes(sExt));
