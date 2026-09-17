@@ -3655,7 +3655,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.1 • 17 set 2026';
+const APP_VERSION = '2.10.2 • 17 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4813,9 +4813,22 @@ function confermaSalvaInventarioFisico() {
         // restare coerente anche quando il file copre solo una parte dei lotti esistenti.
         if (!r.lotti) r.lotti = [];
         row.lottiExcel.forEach(({ lotto, qta }) => {
-          const esistente = r.lotti.find(l => String(l.lotto || '').trim().toUpperCase() === lotto.toUpperCase());
-          if (esistente) {
-            esistente.qta = qta;
+          const lKey = lotto.toUpperCase();
+          const corrispondenti = r.lotti.filter(l => String(l.lotto || '').trim().toUpperCase() === lKey);
+          if (corrispondenti.length) {
+            // BUG FIX: con dati storici incoerenti può capitare più di un lotto in archivio
+            // con lo stesso codice (es. due carichi distinti registrati separatamente senza
+            // accorgersi che il lotto era già presente). Usare solo il primo trovato e
+            // ignorare gli altri lasciava la loro quantità residua intatta: il totale
+            // dell'articolo non si allineava mai al valore del file (es. 4+3=7 in archivio,
+            // file dice 4, ma il "3" del secondo duplicato restava lì per sempre). Ora tutti
+            // i duplicati con lo stesso codice lotto vengono consolidati in un unico record
+            // con la quantità del file.
+            corrispondenti[0].qta = qta;
+            for (let i = 1; i < corrispondenti.length; i++) {
+              const idx = r.lotti.indexOf(corrispondenti[i]);
+              if (idx !== -1) r.lotti.splice(idx, 1);
+            }
           } else {
             r.lotti.push({
               id: DB.nextId('lotto'),
