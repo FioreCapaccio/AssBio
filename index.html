@@ -1582,6 +1582,38 @@
     </div>
   </div>
 
+  <!-- ARTICOLI MANCANTI DALL'ARCHIVIO (ALLINEAMENTO GIACENZE DA EXCEL) MODAL -->
+  <div class="modal-overlay" id="modalArticoliMancantiExcel" onclick="ignoraArticoliMancantiExcel()">
+    <div class="modal modal-lg" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3>⚠️ Articoli nel file non presenti in archivio</h3>
+        <button class="modal-close" onclick="ignoraArticoliMancantiExcel()">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="articoliMancantiExcelMsg" style="margin-bottom:14px;"></p>
+        <div class="card" style="margin-bottom:0;">
+          <div class="table-wrap">
+            <table class="table" style="width:100%;">
+              <thead>
+                <tr style="background:var(--surface2);">
+                  <th style="padding:10px; text-align:left;">Codice</th>
+                  <th style="padding:10px; text-align:left;">Descrizione</th>
+                  <th style="padding:10px; text-align:center;">Quantità</th>
+                  <th style="padding:10px; text-align:left;">Lotto/i</th>
+                </tr>
+              </thead>
+              <tbody id="tbArticoliMancantiExcel"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="ignoraArticoliMancantiExcel()">Ignora (non creare)</button>
+        <button class="btn btn-primary" onclick="creaArticoliMancantiExcel()">✅ Crea questi articoli</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ===== BOLLE CARICO/SCARICO ===== -->
   <div id="section-bolle" class="section">
     <div class="page-header">
@@ -3590,7 +3622,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.9.9 • 17 set 2026';
+const APP_VERSION = '2.10.0 • 17 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4802,7 +4834,8 @@ let _invImpData = { headers: [], rows: [] };
 const INVIMP_FIELDS = [
   { id: 'codice', label: 'Codice Ricambio', required: true, hints: ['codice', 'cod', 'sku', 'articolo'] },
   { id: 'giacenza', label: 'Giacenza (quantità)', required: true, hints: ['giacenza', 'qta', 'quantit', 'stock', 'qty'] },
-  { id: 'lotto', label: 'Lotto / Batch (opzionale)', required: false, hints: ['batch', 'lotto', 'lot', 'partita'] }
+  { id: 'lotto', label: 'Lotto / Batch (opzionale)', required: false, hints: ['batch', 'lotto', 'lot', 'partita'] },
+  { id: 'descrizione', label: 'Descrizione (opzionale, per nuovi articoli)', required: false, hints: ['descrizione', 'denominazione', 'desc'] }
 ];
 
 function openInventarioExcelImportModal() {
@@ -4908,6 +4941,12 @@ function preparaMappingInvImp() {
 }
 
 function eseguiAllineamentoGiacenzeExcel() {
+  // Azzera un eventuale stato residuo di un import precedente interrotto (es. con Esc anziché
+  // "Ignora"/"Crea"), per evitare che un vecchio passaggio "in sospeso" scatti su questo nuovo
+  // import.
+  _articoliMancantiExcel = [];
+  _procediConInventarioFisicoInAttesa = false;
+
   const selects = document.querySelectorAll('.invimp-mapping-select');
   const mapping = {};
   selects.forEach(sel => {
@@ -4923,20 +4962,32 @@ function eseguiAllineamentoGiacenzeExcel() {
 
   const fornitoreSel = (document.getElementById('invimp_fornitore').value || '').trim();
   const hasLottoMapping = mapping.lotto !== undefined;
+  const hasDescrizioneMapping = mapping.descrizione !== undefined;
 
   // Aggrega per codice (somma eventuali righe duplicate) prima del confronto con l'archivio.
   // Se è mappata anche la colonna Lotto/Batch, si tiene traccia separatamente della giacenza
-  // per ciascun lotto (una riga del file = un lotto), oltre al totale per articolo.
+  // per ciascun lotto (una riga del file = un lotto), oltre al totale per articolo. Si tiene
+  // anche traccia di TUTTI i codici validi visti nel file (fileCodesSet), a prescindere dal
+  // fatto che corrispondano o meno a un ricambio esistente: serve sia per individuare gli
+  // articoli mancanti dall'archivio, sia per individuare — nel verso opposto — gli articoli
+  // già in archivio ma assenti dal file (possibili esuberanze).
   const totali = new Map();
+  const fileCodesSet = new Set();
   let righeSaltate = 0;
   _invImpData.rows.forEach(row => {
     const codice = String(row[mapping.codice] ?? '').trim();
     const qta = parseFloat(String(row[mapping.giacenza] ?? '').replace(',', '.'));
     if (!codice || isNaN(qta)) { righeSaltate++; return; }
     const key = codice.toUpperCase();
-    if (!totali.has(key)) totali.set(key, { codiceOriginale: codice, qta: 0, lottiMap: new Map() });
+    fileCodesSet.add(key);
+    if (!totali.has(key)) totali.set(key, { codiceOriginale: codice, qta: 0, lottiMap: new Map(), descrizione: '' });
     const entry = totali.get(key);
     entry.qta += qta;
+
+    if (hasDescrizioneMapping && !entry.descrizione) {
+      const descRaw = String(row[mapping.descrizione] ?? '').trim();
+      if (descRaw) entry.descrizione = descRaw;
+    }
 
     if (hasLottoMapping) {
       const lottoRaw = String(row[mapping.lotto] ?? '').trim();
@@ -4955,15 +5006,61 @@ function eseguiAllineamentoGiacenzeExcel() {
 
   const nonTrovati = [];
   _inventarioFisico = [];
-  totali.forEach(({ codiceOriginale, qta, lottiMap }, key) => {
+  totali.forEach(({ codiceOriginale, qta, lottiMap, descrizione }, key) => {
     const r = DB.ricambi.find(x => String(x.codice || '').toUpperCase() === key);
-    if (!r) { nonTrovati.push(codiceOriginale); return; }
-    const item = { id: r.id, codice: r.codice, descrizione: r.descrizione, qta: Math.max(0, Math.round(qta)) };
-    if (hasLottoMapping && lottiMap.size > 0) {
-      item.lottiExcel = [...lottiMap.values()].map(l => ({ lotto: l.lottoOriginale, qta: Math.max(0, Math.round(l.qta)) }));
+    const lottiExcel = lottiMap.size > 0
+      ? [...lottiMap.values()].map(l => ({ lotto: l.lottoOriginale, qta: Math.max(0, Math.round(l.qta)) }))
+      : [];
+    if (!r) {
+      nonTrovati.push({ codice: codiceOriginale, descrizione, qta: Math.max(0, Math.round(qta)), lottiExcel });
+      return;
     }
+    const item = { id: r.id, codice: r.codice, descrizione: r.descrizione, qta: Math.max(0, Math.round(qta)) };
+    if (hasLottoMapping && lottiExcel.length) item.lottiExcel = lottiExcel;
     _inventarioFisico.push(item);
   });
+
+  // ESUBERANZE: ricambi già in archivio ma il cui codice non compare da nessuna parte nel
+  // file caricato. Se è stato scelto un fornitore, il confronto si limita ai suoi articoli
+  // (il file probabilmente copre solo quel fornitore, non l'intero magazzino) — altrimenti
+  // si considera l'intero archivio. Non vengono toccati in alcun modo: solo esportati in un
+  // file a parte per la verifica manuale.
+  const ricambiDaConfrontare = fornitoreSel ? DB.ricambi.filter(r => (r.fornitore || '') === fornitoreSel) : DB.ricambi;
+  const esuberanze = ricambiDaConfrontare.filter(r => r.codice && !fileCodesSet.has(String(r.codice).toUpperCase()));
+  if (esuberanze.length) {
+    const wsEsub = XLSX.utils.json_to_sheet(esuberanze.map(r => ({
+      'Codice': r.codice,
+      'Descrizione': r.descrizione || '',
+      'Fornitore': r.fornitore || '',
+      'Giacenza in archivio': r.qta || 0,
+      'Nota': 'Presente in archivio ma assente dal file importato'
+    })));
+    const wbEsub = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wbEsub, wsEsub, 'Esuberanze');
+    XLSX.writeFile(wbEsub, `Esuberanze_Magazzino_${today()}.xlsx`);
+    mostraToast(`⚠️ ${esuberanze.length} articolo/i in archivio ${fornitoreSel ? 'per ' + fornitoreSel + ' ' : ''}non risultano nel file: esportati in "Esuberanze_Magazzino_${today()}.xlsx" per la verifica.`, 'warning');
+  }
+
+  closeModal('modalInventarioExcelImport');
+
+  if (righeSaltate) {
+    console.warn(`Allineamento giacenze: ${righeSaltate} riga/e saltate (codice o giacenza mancante/non numerica).`);
+  }
+
+  if (nonTrovati.length) {
+    // Articoli presenti nel file ma non in archivio: si avvisa e si propone di inserirli
+    // copiando codice, descrizione, quantità e lotto direttamente dal file, invece di
+    // scartarli silenziosamente come accadeva finora. Questo modal si apre PRIMA di quello
+    // di allineamento giacenze (se ci sono anche articoli già noti da aggiornare): alla sua
+    // chiusura — creazione o "ignora" — _procediConInventarioFisicoSeNecessario() prosegue
+    // con quel secondo passaggio, evitando di sovrapporre due modali insieme.
+    _articoliMancantiExcel = nonTrovati;
+    _articoliMancantiExcelFornitore = fornitoreSel;
+    _inventarioFisicoFornitore = fornitoreSel;
+    _procediConInventarioFisicoInAttesa = _inventarioFisico.length > 0;
+    apriArticoliMancantiExcel();
+    return;
+  }
 
   if (!_inventarioFisico.length) {
     mostraToast('Nessuno dei codici presenti nel file corrisponde a un ricambio in archivio.', 'danger');
@@ -4971,18 +5068,113 @@ function eseguiAllineamentoGiacenzeExcel() {
   }
 
   _inventarioFisicoFornitore = fornitoreSel;
-
-  closeModal('modalInventarioExcelImport');
   openModal('modalInventarioFisico');
   renderTbInventarioFisico();
   salvaInventarioFisico();
+}
 
-  if (nonTrovati.length) {
-    mostraToast(`⚠️ ${nonTrovati.length} codice/i del file non trovati in archivio e ignorati: ${nonTrovati.slice(0, 8).join(', ')}${nonTrovati.length > 8 ? '…' : ''}`, 'warning');
+// ======================== ARTICOLI MANCANTI DALL'ARCHIVIO (IMPORT EXCEL) ========================
+let _articoliMancantiExcel = [];
+let _articoliMancantiExcelFornitore = '';
+let _procediConInventarioFisicoInAttesa = false;
+
+// Chiamata alla chiusura (creazione o "ignora") del modal articoli mancanti: se l'ultimo
+// import conteneva anche codici già noti in archivio da aggiornare, apre ora il secondo
+// passaggio (allineamento giacenze/lotti) rimasto in sospeso.
+function _procediConInventarioFisicoSeNecessario() {
+  if (_procediConInventarioFisicoInAttesa) {
+    _procediConInventarioFisicoInAttesa = false;
+    openModal('modalInventarioFisico');
+    renderTbInventarioFisico();
+    salvaInventarioFisico();
   }
-  if (righeSaltate) {
-    console.warn(`Allineamento giacenze: ${righeSaltate} riga/e saltate (codice o giacenza mancante/non numerica).`);
+}
+
+function apriArticoliMancantiExcel() {
+  if (!_articoliMancantiExcel.length) return;
+  _renderArticoliMancantiExcel();
+  openModal('modalArticoliMancantiExcel');
+}
+
+function _renderArticoliMancantiExcel() {
+  const tb = document.getElementById('tbArticoliMancantiExcel');
+  if (!tb) return;
+  const msg = document.getElementById('articoliMancantiExcelMsg');
+  if (msg) {
+    msg.innerHTML = `Nel file sono presenti <strong>${_articoliMancantiExcel.length}</strong> codice/i che non risultano in archivio. Verranno creati come nuovi ricambi copiando codice, descrizione, quantità e lotto direttamente dal file.`;
   }
+  tb.innerHTML = _articoliMancantiExcel.map((a, idx) => {
+    const lottiTxt = a.lottiExcel && a.lottiExcel.length
+      ? a.lottiExcel.map(l => `${escHtml(l.lotto)} (${l.qta})`).join(', ')
+      : '<span style="color:var(--text-muted);">—</span>';
+    return `<tr>
+      <td><strong>${escHtml(a.codice)}</strong></td>
+      <td><input type="text" class="form-control" data-idx="${idx}" data-field="descrizione" value="${escAttr(a.descrizione || '')}" placeholder="Descrizione (obbligatoria)" oninput="_aggiornaCampoArticoloMancante(this)"></td>
+      <td style="text-align:center;">${a.qta}</td>
+      <td>${lottiTxt}</td>
+    </tr>`;
+  }).join('');
+}
+
+function _aggiornaCampoArticoloMancante(input) {
+  const idx = parseInt(input.dataset.idx);
+  const field = input.dataset.field;
+  if (_articoliMancantiExcel[idx]) _articoliMancantiExcel[idx][field] = input.value;
+}
+
+function ignoraArticoliMancantiExcel() {
+  _articoliMancantiExcel = [];
+  closeModal('modalArticoliMancantiExcel');
+  _procediConInventarioFisicoSeNecessario();
+}
+
+function creaArticoliMancantiExcel() {
+  const senzaDescrizione = _articoliMancantiExcel.filter(a => !String(a.descrizione || '').trim());
+  if (senzaDescrizione.length) {
+    mostraToast(`Inserisci una descrizione per tutti gli articoli prima di crearli (mancante per: ${senzaDescrizione.map(a => a.codice).slice(0, 5).join(', ')}${senzaDescrizione.length > 5 ? '…' : ''}).`, 'warning');
+    return;
+  }
+
+  let creati = 0;
+  _articoliMancantiExcel.forEach(a => {
+    const nuovoId = DB.nextId('ricambio');
+    const lotti = (a.lottiExcel || []).map(l => ({
+      id: DB.nextId('lotto'),
+      lotto: l.lotto,
+      qta: l.qta,
+      scadenza: '',
+      carico: today(),
+      fornitore: _articoliMancantiExcelFornitore || '',
+      note: 'Importato da allineamento Excel (articolo mancante dall\'archivio)'
+    }));
+    DB.ricambi.push({
+      id: nuovoId,
+      codice: a.codice,
+      descrizione: a.descrizione.trim(),
+      categoria: 'Altro',
+      strumento: '',
+      qta: a.qta,
+      soglia: 0,
+      um: 'pz',
+      fornitore: _articoliMancantiExcelFornitore || '',
+      prezzo: 0,
+      lead: 0,
+      note: 'Creato da allineamento Excel: articolo presente nel file ma non in archivio.',
+      lotti,
+      createdAt: today()
+    });
+    creati++;
+  });
+
+  DB.save();
+  renderRicambi();
+  renderInventarioDettagliato();
+  mostraToast(`✅ ${creati} nuovo/i articolo/i creato/i in archivio.`, 'success');
+  DB.auditLog('create', 'ricambio', null, `Creati ${creati} ricambi da allineamento Excel (articoli mancanti)`);
+
+  _articoliMancantiExcel = [];
+  closeModal('modalArticoliMancantiExcel');
+  _procediConInventarioFisicoSeNecessario();
 }
 
 function renderInventarioDettagliato() {
