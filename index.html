@@ -3590,7 +3590,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.9.8 • 16 set 2026';
+const APP_VERSION = '2.9.9 • 17 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4652,15 +4652,31 @@ function salvaInventarioFisico() {
   _inventarioFisico.forEach(row => {
     const r = DB.ricambi.find(x => x.id === row.id);
     const attuale = r ? (r.qta || 0) : 0;
-    const delta = row.qta - attuale;
+
+    // Quando il file porta lotti specifici (colonna BATCH), il totale che verrà davvero
+    // salvato è: somma dei lotti del file + eventuali lotti già in archivio ma non citati
+    // nel file (che restano intoccati) — non semplicemente row.qta, che rispecchia solo i
+    // lotti presenti nel file. Si simula qui lo stesso calcolo per mostrare una discrepanza
+    // reale e coerente con quanto poi effettivamente confermato.
+    let contata = row.qta;
+    if (r && row.lottiExcel && row.lottiExcel.length) {
+      const codiciFile = new Set(row.lottiExcel.map(l => l.lotto.toUpperCase()));
+      const lottiNonCitati = (r.lotti || []).filter(l => !codiciFile.has(String(l.lotto || '').trim().toUpperCase()));
+      const sommaNonCitati = lottiNonCitati.reduce((s, l) => s + (l.qta || 0), 0);
+      const sommaFile = row.lottiExcel.reduce((s, l) => s + (l.qta || 0), 0);
+      contata = sommaNonCitati + sommaFile;
+    }
+
+    const delta = contata - attuale;
     if (delta !== 0) {
       rows.push({
         id: row.id,
         codice: row.codice,
         descrizione: row.descrizione,
         attuale: attuale,
-        contata: row.qta,
-        delta: delta
+        contata: contata,
+        delta: delta,
+        lottiExcel: row.lottiExcel
       });
     }
   });
@@ -4675,8 +4691,11 @@ function salvaInventarioFisico() {
   tb.innerHTML = rows.map(ro => {
     const cls = ro.delta > 0 ? 'var(--success)' : 'var(--danger)';
     const segno = ro.delta > 0 ? '+' : '';
+    const notaLotti = ro.lottiExcel && ro.lottiExcel.length
+      ? `<br><small style="color:var(--text-muted);">🏷️ ${ro.lottiExcel.length} lotto${ro.lottiExcel.length > 1 ? 'i' : ''} dal file: ${escHtml(ro.lottiExcel.map(l => l.lotto).slice(0, 4).join(', '))}${ro.lottiExcel.length > 4 ? '…' : ''}</small>`
+      : '';
     return `<tr>
-      <td><strong>${escHtml(ro.codice)}</strong></td>
+      <td><strong>${escHtml(ro.codice)}</strong>${notaLotti}</td>
       <td>${escHtml(trunc(ro.descrizione, 35))}</td>
       <td style="text-align:center;">${ro.attuale}</td>
       <td style="text-align:center;">${ro.contata}</td>
@@ -4705,27 +4724,55 @@ function confermaSalvaInventarioFisico() {
     const r = DB.ricambi.find(x => x.id === row.id);
     if (r) {
       const vecchiaQta = r.qta || 0;
-      r.qta = row.qta;
 
-      const hasLotti = (r.lotti || []).some(l => l.qta > 0);
-      if (!hasLotti) {
-        // Nessun lotto attivo: qta base già aggiornata
+      if (row.lottiExcel && row.lottiExcel.length) {
+        // Il file Excel indica la giacenza per singolo lotto (colonna BATCH): per ogni lotto
+        // elencato si aggiorna la quantità se il lotto esiste già in archivio (stesso codice
+        // lotto, confronto case-insensitive), altrimenti lo si inserisce come nuovo. I lotti
+        // già presenti in archivio ma non citati nel file non vengono toccati. La giacenza
+        // totale del ricambio viene poi ricalcolata come somma di TUTTI i suoi lotti, per
+        // restare coerente anche quando il file copre solo una parte dei lotti esistenti.
+        if (!r.lotti) r.lotti = [];
+        row.lottiExcel.forEach(({ lotto, qta }) => {
+          const esistente = r.lotti.find(l => String(l.lotto || '').trim().toUpperCase() === lotto.toUpperCase());
+          if (esistente) {
+            esistente.qta = qta;
+          } else {
+            r.lotti.push({
+              id: DB.nextId('lotto'),
+              lotto: lotto,
+              qta: qta,
+              scadenza: '',
+              carico: today(),
+              fornitore: _inventarioFisicoFornitore || r.fornitore || '',
+              note: `Importato da allineamento Excel (colonna BATCH)${_inventarioFisicoFornitore ? ' — fornitore: ' + _inventarioFisicoFornitore : ''}`
+            });
+          }
+        });
+        r.qta = r.lotti.reduce((s, l) => s + (l.qta || 0), 0);
       } else {
-        const lottiTot = (r.lotti || []).reduce((s, l) => s + (l.qta || 0), 0);
-        const diff = row.qta - lottiTot;
-        if (diff !== 0) {
-          if (!r.lotti) r.lotti = [];
-          r.lotti.push({
-            id: DB.nextId('lotto'),
-            lotto: 'INV-' + today(),
-            qta: diff,
-            scadenza: '',
-            carico: today(),
-            fornitore: _inventarioFisicoFornitore || 'Inventario Fisico',
-            note: _inventarioFisicoFornitore
-              ? `Rettifica da allineamento Excel (fornitore: ${_inventarioFisicoFornitore}). Qta precedente: ${vecchiaQta}`
-              : `Rettifica da inventario fisico. Qta precedente: ${vecchiaQta}`
-          });
+        r.qta = row.qta;
+
+        const hasLotti = (r.lotti || []).some(l => l.qta > 0);
+        if (!hasLotti) {
+          // Nessun lotto attivo: qta base già aggiornata
+        } else {
+          const lottiTot = (r.lotti || []).reduce((s, l) => s + (l.qta || 0), 0);
+          const diff = row.qta - lottiTot;
+          if (diff !== 0) {
+            if (!r.lotti) r.lotti = [];
+            r.lotti.push({
+              id: DB.nextId('lotto'),
+              lotto: 'INV-' + today(),
+              qta: diff,
+              scadenza: '',
+              carico: today(),
+              fornitore: _inventarioFisicoFornitore || 'Inventario Fisico',
+              note: _inventarioFisicoFornitore
+                ? `Rettifica da allineamento Excel (fornitore: ${_inventarioFisicoFornitore}). Qta precedente: ${vecchiaQta}`
+                : `Rettifica da inventario fisico. Qta precedente: ${vecchiaQta}`
+            });
+          }
         }
       }
       aggiornati++;
@@ -4754,7 +4801,8 @@ let _invImpData = { headers: [], rows: [] };
 
 const INVIMP_FIELDS = [
   { id: 'codice', label: 'Codice Ricambio', required: true, hints: ['codice', 'cod', 'sku', 'articolo'] },
-  { id: 'giacenza', label: 'Giacenza (quantità)', required: true, hints: ['giacenza', 'qta', 'quantit', 'stock', 'qty'] }
+  { id: 'giacenza', label: 'Giacenza (quantità)', required: true, hints: ['giacenza', 'qta', 'quantit', 'stock', 'qty'] },
+  { id: 'lotto', label: 'Lotto / Batch (opzionale)', required: false, hints: ['batch', 'lotto', 'lot', 'partita'] }
 ];
 
 function openInventarioExcelImportModal() {
@@ -4874,8 +4922,11 @@ function eseguiAllineamentoGiacenzeExcel() {
   }
 
   const fornitoreSel = (document.getElementById('invimp_fornitore').value || '').trim();
+  const hasLottoMapping = mapping.lotto !== undefined;
 
-  // Aggrega per codice (somma eventuali righe duplicate) prima del confronto con l'archivio
+  // Aggrega per codice (somma eventuali righe duplicate) prima del confronto con l'archivio.
+  // Se è mappata anche la colonna Lotto/Batch, si tiene traccia separatamente della giacenza
+  // per ciascun lotto (una riga del file = un lotto), oltre al totale per articolo.
   const totali = new Map();
   let righeSaltate = 0;
   _invImpData.rows.forEach(row => {
@@ -4883,10 +4934,17 @@ function eseguiAllineamentoGiacenzeExcel() {
     const qta = parseFloat(String(row[mapping.giacenza] ?? '').replace(',', '.'));
     if (!codice || isNaN(qta)) { righeSaltate++; return; }
     const key = codice.toUpperCase();
-    if (totali.has(key)) {
-      totali.get(key).qta += qta;
-    } else {
-      totali.set(key, { codiceOriginale: codice, qta });
+    if (!totali.has(key)) totali.set(key, { codiceOriginale: codice, qta: 0, lottiMap: new Map() });
+    const entry = totali.get(key);
+    entry.qta += qta;
+
+    if (hasLottoMapping) {
+      const lottoRaw = String(row[mapping.lotto] ?? '').trim();
+      if (lottoRaw) {
+        const lKey = lottoRaw.toUpperCase();
+        if (entry.lottiMap.has(lKey)) entry.lottiMap.get(lKey).qta += qta;
+        else entry.lottiMap.set(lKey, { lottoOriginale: lottoRaw, qta });
+      }
     }
   });
 
@@ -4897,10 +4955,14 @@ function eseguiAllineamentoGiacenzeExcel() {
 
   const nonTrovati = [];
   _inventarioFisico = [];
-  totali.forEach(({ codiceOriginale, qta }, key) => {
+  totali.forEach(({ codiceOriginale, qta, lottiMap }, key) => {
     const r = DB.ricambi.find(x => String(x.codice || '').toUpperCase() === key);
     if (!r) { nonTrovati.push(codiceOriginale); return; }
-    _inventarioFisico.push({ id: r.id, codice: r.codice, descrizione: r.descrizione, qta: Math.max(0, Math.round(qta)) });
+    const item = { id: r.id, codice: r.codice, descrizione: r.descrizione, qta: Math.max(0, Math.round(qta)) };
+    if (hasLottoMapping && lottiMap.size > 0) {
+      item.lottiExcel = [...lottiMap.values()].map(l => ({ lotto: l.lottoOriginale, qta: Math.max(0, Math.round(l.qta)) }));
+    }
+    _inventarioFisico.push(item);
   });
 
   if (!_inventarioFisico.length) {
