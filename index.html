@@ -1463,12 +1463,12 @@
 
   <!-- INVENTARIO FISICO MODAL -->
   <div class="modal-overlay" id="modalInventarioFisico" onclick="closeModal('modalInventarioFisico')">
-    <div class="modal modal-lg" onclick="event.stopPropagation()">
+    <div class="modal" style="max-width:95vw; width:1400px; max-height:95vh;" onclick="event.stopPropagation()">
       <div class="modal-header">
-        <h3>📱 Inventario Fisico (Scanner Barcode)</h3>
+        <h3 id="modalInventarioFisicoTitolo">📱 Inventario Fisico (Scanner Barcode)</h3>
         <button class="modal-close" onclick="closeModal('modalInventarioFisico')">✕</button>
       </div>
-      <div class="modal-body" style="max-height:80vh; display:flex; flex-direction:column; gap:12px;">
+      <div class="modal-body" style="max-height:88vh; display:flex; flex-direction:column; gap:12px;">
         <!-- SEZIONE SCANNER -->
         <div id="inv_scanner_section">
           <div class="form-group" style="margin-bottom:0;">
@@ -1502,19 +1502,20 @@
           </div>
         </div>
         <!-- SEZIONE PREVIEW DISCREPANZE -->
-        <div id="inv_preview_section" style="display:none; flex:1; overflow-y:auto;">
+        <div id="inv_preview_section" style="display:none; flex:1; flex-direction:column; overflow-y:auto;">
           <h4 style="margin-bottom:10px; color:var(--text);">📊 Riepilogo Discrepanze</h4>
-          <div id="inv_preview_msg" style="font-size:0.9rem; margin-bottom:10px;"></div>
+          <div id="inv_preview_msg" style="font-size:0.95rem; margin-bottom:14px;"></div>
           <div class="card" style="margin-bottom:0;">
             <div class="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>Codice</th>
+                    <th style="width:140px;">Codice</th>
                     <th>Descrizione</th>
-                    <th style="text-align:center;">Qta Attuale</th>
-                    <th style="text-align:center;">Qta Contata</th>
-                    <th style="text-align:center;">Delta</th>
+                    <th>Lotti dal file</th>
+                    <th style="text-align:center; width:110px;">Qta Attuale</th>
+                    <th style="text-align:center; width:110px;">Qta Contata</th>
+                    <th style="text-align:center; width:90px;">Delta</th>
                   </tr>
                 </thead>
                 <tbody id="tbInventarioFisicoPreview"></tbody>
@@ -1610,6 +1611,38 @@
       <div class="modal-footer">
         <button class="btn btn-ghost" onclick="ignoraArticoliMancantiExcel()">Ignora (non creare)</button>
         <button class="btn btn-primary" onclick="creaArticoliMancantiExcel()">✅ Crea questi articoli</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ANTEPRIMA ESUBERANZE MAGAZZINO (ALLINEAMENTO GIACENZE DA EXCEL) MODAL -->
+  <div class="modal-overlay" id="modalAnteprimaEsuberanze" onclick="chiudiAnteprimaEsuberanze()">
+    <div class="modal modal-lg" style="max-width:1100px;" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3>📦 Possibili esuberanze in magazzino</h3>
+        <button class="modal-close" onclick="chiudiAnteprimaEsuberanze()">✕</button>
+      </div>
+      <div class="modal-body" style="max-height:70vh; display:flex; flex-direction:column;">
+        <p id="anteprimaEsuberanzeMsg" style="margin-bottom:14px;"></p>
+        <div class="card" style="margin-bottom:0; flex:1; overflow:hidden; display:flex; flex-direction:column;">
+          <div class="table-wrap" style="overflow-y:auto;">
+            <table class="table" style="width:100%;">
+              <thead>
+                <tr>
+                  <th style="padding:10px; text-align:left; background:var(--surface2); position:sticky; top:0; z-index:1;">Codice</th>
+                  <th style="padding:10px; text-align:left; background:var(--surface2); position:sticky; top:0; z-index:1;">Descrizione</th>
+                  <th style="padding:10px; text-align:left; background:var(--surface2); position:sticky; top:0; z-index:1;">Fornitore</th>
+                  <th style="padding:10px; text-align:center; background:var(--surface2); position:sticky; top:0; z-index:1;">Giacenza</th>
+                </tr>
+              </thead>
+              <tbody id="tbAnteprimaEsuberanze"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="chiudiAnteprimaEsuberanze()">Chiudi (non esportare)</button>
+        <button class="btn btn-primary" onclick="esportaEsuberanzeExcel()">⬇️ Esporta in Excel</button>
       </div>
     </div>
   </div>
@@ -3622,7 +3655,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.0 • 17 set 2026';
+const APP_VERSION = '2.10.1 • 17 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4584,10 +4617,16 @@ function renderAll(section) {
 
 function openInventarioFisicoModal() {
   _inventarioFisicoFornitore = ''; // sessione manuale: nessun fornitore associato alle rettifiche
+  _inventarioFisicoDaExcel = false;
+  document.getElementById('modalInventarioFisicoTitolo').textContent = '📱 Inventario Fisico (Scanner Barcode)';
   openModal('modalInventarioFisico');
   setTimeout(() => document.getElementById('inv_scan_codice').focus(), 300);
 }
 
+// true quando il modal è stato aperto dal flusso di allineamento Excel (invece che dallo
+// scanner manuale): se non ci sono discrepanze da mostrare non ha senso lasciarlo aperto
+// sulla sezione scanner con dentro le righe del file — va chiuso subito.
+let _inventarioFisicoDaExcel = false;
 let _inventarioFisico = [];
 let _inventarioFisicoFornitore = ''; // valorizzato solo dall'allineamento guidato da Excel
 
@@ -4715,6 +4754,13 @@ function salvaInventarioFisico() {
 
   if (!rows.length) {
     mostraToast('Nessuna discrepanza rilevata: le quantità corrispondono al database.', 'success');
+    // Aperto dal flusso Excel (non dallo scanner manuale): non ha senso lasciarlo aperto sulla
+    // sezione scanner con dentro le righe del file appena importato — lo si chiude subito.
+    if (_inventarioFisicoDaExcel) {
+      _inventarioFisico = [];
+      closeModal('modalInventarioFisico');
+    }
+    _procediConEsuberanzeSeNecessario();
     return;
   }
 
@@ -4723,12 +4769,13 @@ function salvaInventarioFisico() {
   tb.innerHTML = rows.map(ro => {
     const cls = ro.delta > 0 ? 'var(--success)' : 'var(--danger)';
     const segno = ro.delta > 0 ? '+' : '';
-    const notaLotti = ro.lottiExcel && ro.lottiExcel.length
-      ? `<br><small style="color:var(--text-muted);">🏷️ ${ro.lottiExcel.length} lotto${ro.lottiExcel.length > 1 ? 'i' : ''} dal file: ${escHtml(ro.lottiExcel.map(l => l.lotto).slice(0, 4).join(', '))}${ro.lottiExcel.length > 4 ? '…' : ''}</small>`
-      : '';
+    const lottiTxt = ro.lottiExcel && ro.lottiExcel.length
+      ? ro.lottiExcel.map(l => `${escHtml(l.lotto)} (${l.qta})`).join(', ')
+      : '<span style="color:var(--text-muted);">—</span>';
     return `<tr>
-      <td><strong>${escHtml(ro.codice)}</strong>${notaLotti}</td>
-      <td>${escHtml(trunc(ro.descrizione, 35))}</td>
+      <td><strong>${escHtml(ro.codice)}</strong></td>
+      <td>${escHtml(trunc(ro.descrizione, 45))}</td>
+      <td style="font-size:0.85rem;">${lottiTxt}</td>
       <td style="text-align:center;">${ro.attuale}</td>
       <td style="text-align:center;">${ro.contata}</td>
       <td style="text-align:center; color:${cls}; font-weight:700;">${segno}${ro.delta}</td>
@@ -4822,6 +4869,7 @@ function confermaSalvaInventarioFisico() {
   document.getElementById('inv_preview_section').style.display = 'none';
   document.getElementById('inv_scanner_section').style.display = '';
   closeModal('modalInventarioFisico');
+  _procediConEsuberanzeSeNecessario();
 }
 
 // ======================== ALLINEAMENTO GIACENZE DA EXCEL ========================
@@ -4946,6 +4994,8 @@ function eseguiAllineamentoGiacenzeExcel() {
   // import.
   _articoliMancantiExcel = [];
   _procediConInventarioFisicoInAttesa = false;
+  _esuberanzeMagazzino = [];
+  _procediConEsuberanzeInAttesa = false;
 
   const selects = document.querySelectorAll('.invimp-mapping-select');
   const mapping = {};
@@ -5020,26 +5070,19 @@ function eseguiAllineamentoGiacenzeExcel() {
     _inventarioFisico.push(item);
   });
 
-  // ESUBERANZE: ricambi già in archivio ma il cui codice non compare da nessuna parte nel
-  // file caricato. Se è stato scelto un fornitore, il confronto si limita ai suoi articoli
-  // (il file probabilmente copre solo quel fornitore, non l'intero magazzino) — altrimenti
-  // si considera l'intero archivio. Non vengono toccati in alcun modo: solo esportati in un
-  // file a parte per la verifica manuale.
+  // ESUBERANZE: ricambi già in archivio, con giacenza attuale > 0 (una giacenza già a 0 non è
+  // una vera esuberanza da segnalare: non c'è nulla di fisico da riconciliare), il cui codice
+  // non compare da nessuna parte nel file caricato. Se è stato scelto un fornitore, il
+  // confronto si limita ai suoi articoli (il file probabilmente copre solo quel fornitore, non
+  // l'intero magazzino) — altrimenti si considera l'intero archivio. Non vengono toccati in
+  // alcun modo: solo mostrati in anteprima, con la possibilità di esportarli in un file a
+  // parte per la verifica manuale. Questo passaggio, quando presente, è sempre l'ULTIMO della
+  // catena (dopo articoli mancanti ed eventuale conciliazione), gestito da
+  // _procediConEsuberanzeSeNecessario().
   const ricambiDaConfrontare = fornitoreSel ? DB.ricambi.filter(r => (r.fornitore || '') === fornitoreSel) : DB.ricambi;
-  const esuberanze = ricambiDaConfrontare.filter(r => r.codice && !fileCodesSet.has(String(r.codice).toUpperCase()));
-  if (esuberanze.length) {
-    const wsEsub = XLSX.utils.json_to_sheet(esuberanze.map(r => ({
-      'Codice': r.codice,
-      'Descrizione': r.descrizione || '',
-      'Fornitore': r.fornitore || '',
-      'Giacenza in archivio': r.qta || 0,
-      'Nota': 'Presente in archivio ma assente dal file importato'
-    })));
-    const wbEsub = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wbEsub, wsEsub, 'Esuberanze');
-    XLSX.writeFile(wbEsub, `Esuberanze_Magazzino_${today()}.xlsx`);
-    mostraToast(`⚠️ ${esuberanze.length} articolo/i in archivio ${fornitoreSel ? 'per ' + fornitoreSel + ' ' : ''}non risultano nel file: esportati in "Esuberanze_Magazzino_${today()}.xlsx" per la verifica.`, 'warning');
-  }
+  _esuberanzeMagazzino = ricambiDaConfrontare.filter(r => r.codice && (r.qta || 0) > 0 && !fileCodesSet.has(String(r.codice).toUpperCase()));
+  _esuberanzeMagazzinoFornitore = fornitoreSel;
+  _procediConEsuberanzeInAttesa = _esuberanzeMagazzino.length > 0;
 
   closeModal('modalInventarioExcelImport');
 
@@ -5053,7 +5096,8 @@ function eseguiAllineamentoGiacenzeExcel() {
     // scartarli silenziosamente come accadeva finora. Questo modal si apre PRIMA di quello
     // di allineamento giacenze (se ci sono anche articoli già noti da aggiornare): alla sua
     // chiusura — creazione o "ignora" — _procediConInventarioFisicoSeNecessario() prosegue
-    // con quel secondo passaggio, evitando di sovrapporre due modali insieme.
+    // con il passaggio successivo (conciliazione o, se non serve, direttamente esuberanze),
+    // evitando di sovrapporre più modali insieme.
     _articoliMancantiExcel = nonTrovati;
     _articoliMancantiExcelFornitore = fornitoreSel;
     _inventarioFisicoFornitore = fornitoreSel;
@@ -5063,11 +5107,15 @@ function eseguiAllineamentoGiacenzeExcel() {
   }
 
   if (!_inventarioFisico.length) {
-    mostraToast('Nessuno dei codici presenti nel file corrisponde a un ricambio in archivio.', 'danger');
+    if (!_procediConEsuberanzeSeNecessario()) {
+      mostraToast('Nessuno dei codici presenti nel file corrisponde a un ricambio in archivio.', 'danger');
+    }
     return;
   }
 
   _inventarioFisicoFornitore = fornitoreSel;
+  _inventarioFisicoDaExcel = true;
+  document.getElementById('modalInventarioFisicoTitolo').textContent = '📊 Conciliazione Inventario da Excel';
   openModal('modalInventarioFisico');
   renderTbInventarioFisico();
   salvaInventarioFisico();
@@ -5080,13 +5128,18 @@ let _procediConInventarioFisicoInAttesa = false;
 
 // Chiamata alla chiusura (creazione o "ignora") del modal articoli mancanti: se l'ultimo
 // import conteneva anche codici già noti in archivio da aggiornare, apre ora il secondo
-// passaggio (allineamento giacenze/lotti) rimasto in sospeso.
+// passaggio (allineamento giacenze/lotti) rimasto in sospeso; altrimenti, se non c'era nulla
+// da conciliare, passa direttamente all'eventuale anteprima esuberanze.
 function _procediConInventarioFisicoSeNecessario() {
   if (_procediConInventarioFisicoInAttesa) {
     _procediConInventarioFisicoInAttesa = false;
+    _inventarioFisicoDaExcel = true;
+    document.getElementById('modalInventarioFisicoTitolo').textContent = '📊 Conciliazione Inventario da Excel';
     openModal('modalInventarioFisico');
     renderTbInventarioFisico();
     salvaInventarioFisico();
+  } else {
+    _procediConEsuberanzeSeNecessario();
   }
 }
 
@@ -5175,6 +5228,69 @@ function creaArticoliMancantiExcel() {
   _articoliMancantiExcel = [];
   closeModal('modalArticoliMancantiExcel');
   _procediConInventarioFisicoSeNecessario();
+}
+
+// ======================== ESUBERANZE MAGAZZINO (IMPORT EXCEL) ========================
+// Articoli in archivio (con giacenza > 0) il cui codice non compare nel file importato:
+// mostrati in anteprima, mai toccati automaticamente — solo esportabili su richiesta in un
+// file a parte per la verifica manuale.
+let _esuberanzeMagazzino = [];
+let _esuberanzeMagazzinoFornitore = '';
+let _procediConEsuberanzeInAttesa = false;
+
+// Ultimo passaggio della catena di import Excel (dopo articoli mancanti ed eventuale
+// conciliazione): se ci sono esuberanze in sospeso, apre l'anteprima. Ritorna true se l'ha
+// aperta, false se non c'era nulla da mostrare (utile a chi chiama per decidere se mostrare
+// un proprio messaggio alternativo).
+function _procediConEsuberanzeSeNecessario() {
+  if (_procediConEsuberanzeInAttesa) {
+    _procediConEsuberanzeInAttesa = false;
+    apriAnteprimaEsuberanze();
+    return true;
+  }
+  return false;
+}
+
+function apriAnteprimaEsuberanze() {
+  if (!_esuberanzeMagazzino.length) return;
+  _renderAnteprimaEsuberanze();
+  openModal('modalAnteprimaEsuberanze');
+}
+
+function _renderAnteprimaEsuberanze() {
+  const tb = document.getElementById('tbAnteprimaEsuberanze');
+  if (!tb) return;
+  const msg = document.getElementById('anteprimaEsuberanzeMsg');
+  if (msg) {
+    msg.innerHTML = `<strong>${_esuberanzeMagazzino.length}</strong> articolo/i in archivio ${_esuberanzeMagazzinoFornitore ? 'del fornitore <strong>' + escHtml(_esuberanzeMagazzinoFornitore) + '</strong> ' : ''}con giacenza &gt; 0 non risultano nel file importato. Non vengono modificati in alcun modo: puoi esportarli in un file a parte per verificarli con calma.`;
+  }
+  tb.innerHTML = _esuberanzeMagazzino.map(r => `<tr>
+    <td><strong>${escHtml(r.codice)}</strong></td>
+    <td>${escHtml(r.descrizione || '')}</td>
+    <td>${escHtml(r.fornitore || '—')}</td>
+    <td style="text-align:center;">${r.qta || 0} ${escHtml(r.um || 'pz')}</td>
+  </tr>`).join('');
+}
+
+function chiudiAnteprimaEsuberanze() {
+  _esuberanzeMagazzino = [];
+  closeModal('modalAnteprimaEsuberanze');
+}
+
+function esportaEsuberanzeExcel() {
+  if (!_esuberanzeMagazzino.length) return;
+  const wsEsub = XLSX.utils.json_to_sheet(_esuberanzeMagazzino.map(r => ({
+    'Codice': r.codice,
+    'Descrizione': r.descrizione || '',
+    'Fornitore': r.fornitore || '',
+    'Giacenza in archivio': r.qta || 0,
+    'Nota': 'Presente in archivio ma assente dal file importato'
+  })));
+  const wbEsub = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wbEsub, wsEsub, 'Esuberanze');
+  XLSX.writeFile(wbEsub, `Esuberanze_Magazzino_${today()}.xlsx`);
+  mostraToast(`⬇️ Esportati ${_esuberanzeMagazzino.length} articolo/i in "Esuberanze_Magazzino_${today()}.xlsx".`, 'success');
+  chiudiAnteprimaEsuberanze();
 }
 
 function renderInventarioDettagliato() {
