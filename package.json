@@ -1,7 +1,7 @@
 {
   "name": "assbio-ivd",
   "productName": "Assistenza Tecnica IVD",
-  "version": "2.10.2",
+  "version": "2.10.3",
   "description": "Gestionale per assistenza tecnica IVD: clienti, interventi, appuntamenti, ricambi, bolle e D.D.T.",
   "main": "main.js",
   "author": "Fioravante Capaccio",

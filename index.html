@@ -3655,7 +3655,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.2 • 17 set 2026';
+const APP_VERSION = '2.10.3 • 18 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -7706,20 +7706,32 @@ function renderFirmeCliente(cliente) {
           <div style="font-size:0.85rem; font-weight:600;">${titolo}</div>
           <div style="font-size:0.75rem; color:var(--text-muted);">Salvata il ${data}</div>
         </div>
+        <button class="btn btn-ghost btn-sm" onclick="rinominaFirmaCliente(${cliente.id}, ${idx})">✏️ Rinomina</button>
         <button class="btn btn-outline-danger btn-sm" onclick="eliminaFirmaCliente(${cliente.id}, ${idx})">🗑️ Elimina</button>
       </div>
     `;
   }).join('');
 }
 
+function rinominaFirmaCliente(clienteId, firmaIdx) {
+  const cliente = DB.clienti.find(c => c.id === clienteId);
+  if (!cliente || !cliente.firme || !cliente.firme[firmaIdx]) return;
+  const f = cliente.firme[firmaIdx];
+  const nuovoNome = prompt('Nome di chi ha firmato:', f.nomeFirmatario || '');
+  if (nuovoNome === null) return;
+  f.nomeFirmatario = nuovoNome.trim();
+  DB.save();
+  renderFirmeCliente(cliente);
+}
+
 function eliminaFirmaCliente(clienteId, firmaIdx) {
   if (!confirm('Eliminare questa firma?')) return;
   const cliente = DB.clienti.find(c => c.id === clienteId);
   if (!cliente || !cliente.firme) return;
-  
+
   cliente.firme.splice(firmaIdx, 1);
   if (cliente.firme.length === 0) delete cliente.firme;
-  
+
   DB.save();
   renderFirmeCliente(cliente);
 }
