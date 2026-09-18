@@ -3655,7 +3655,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.3 • 18 set 2026';
+const APP_VERSION = '2.10.4 • 18 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -6931,7 +6931,21 @@ const SUPABASE = {
             const localMatch = (DB[tbl] || []).find(x => x.id === rec.id);
             const localVal = localMatch ? (localMatch[idField] || '') : '';
             const cloudVal = rec[idField] || '';
-            if (localMatch && localVal !== cloudVal && (localVal || cloudVal)) {
+            // BUG FIX (falso positivo — vero incidente osservato: "OPSEDALE RENZETTI..."
+            // corretto in "OSPEDALE RENZETTI..." su un dispositivo, ma non ancora sincronizzato
+            // sull'altro): un cambio legittimo del campo identità (es. correzione di un refuso
+            // nella ragione sociale, o del numero di un intervento) veniva scambiato per una
+            // collisione tra due record DIVERSI che per puro caso avevano lo stesso id — il
+            // record veniva rinumerato e l'id originale spariva dall'array, orfanando tutti gli
+            // interventi/appuntamenti che puntavano a quell'id (mostrando "N/D"). Un vero
+            // scontro d'id capita solo tra due record creati indipendentemente su due
+            // dispositivi diversi, quindi avranno quasi certamente anche un createdAt diverso;
+            // una semplice modifica allo stesso record mantiene invece il createdAt originale.
+            // Si rinumera quindi solo se ANCHE il createdAt differisce (o manca): se i due
+            // createdAt coincidono, si tratta con altissima probabilità dello stesso record
+            // modificato altrove, e va semplicemente aggiornato mantenendo il suo id.
+            const stessoCreatedAt = localMatch && localMatch.createdAt && rec.createdAt && localMatch.createdAt === rec.createdAt;
+            if (localMatch && localVal !== cloudVal && (localVal || cloudVal) && !stessoCreatedAt) {
               console.warn(`[Supabase] Collisione ID su ${tbl} (id ${rec.id}): locale="${localVal}" vs cloud="${cloudVal}" — rinumero il record dal cloud.`);
               collisioneRilevata = true;
               return { ...rec, id: DB.nextId(idType) };
@@ -11348,24 +11362,45 @@ function _renderReportIntegritaDati() {
   if (btn) btn.style.display = '';
 }
 
+// Un cliente orfano (clienteId che non esiste più) capita quasi sempre perché lo stesso
+// cliente è stato ricreato con un id diverso altrove (es. bug di sincronizzazione: una
+// correzione della ragione sociale scambiata per una collisione d'id tra due dispositivi,
+// vedi il fix in SUPABASE.syncDown). Il numero di matricola dello strumento coinvolto resta
+// però lo stesso: lo si usa per ritrovare con certezza il cliente giusto tra quelli attuali,
+// invece di limitarsi ad azzerare il riferimento perdendo il collegamento per sempre.
+function _trovaClienteViaSeriale(seriale) {
+  const s = String(seriale || '').trim().toUpperCase();
+  if (!s) return null;
+  const match = DB.clienti.filter(c => (c.strumentiInstallati || []).some(st => String(st.seriale || '').trim().toUpperCase() === s));
+  return match.length === 1 ? match[0] : null;
+}
+
 function eseguiPuliziaDatiIncoerenti() {
   const { issues, totale } = analizzaIntegritaDati();
   if (totale === 0) { mostraToast('Nessun riferimento orfano da ripulire.', 'success'); return; }
 
   if (!confirm(
     `Verranno corretti ${totale} riferimenti orfani:\n\n` +
-    `• Sui campi cliente/fornitore mancanti: il riferimento verrà rimosso (il record resta, mostrerà semplicemente "N/D")\n` +
+    `• Sui campi cliente: se il numero di matricola dello strumento coinvolto corrisponde a un cliente attuale, il riferimento viene ricollegato a quel cliente; altrimenti viene rimosso (il record resta, mostrerà semplicemente "N/D")\n` +
+    `• Sui campi fornitore mancanti: il riferimento verrà rimosso (il record resta, mostrerà semplicemente "N/D")\n` +
     `• Sulle righe ricambio/articolo che puntano a un ricambio ormai eliminato: la singola riga verrà rimossa (il resto dell'intervento/bolla resta intatto)\n\n` +
     `Nessun cliente, intervento, ricambio o bolla verrà eliminato. Procedere?`
   )) return;
 
+  let riconnessi = 0;
   issues.interventiClienteOrfano.forEach(x => {
     const i = DB.interventi.find(r => r.id === x.id);
-    if (i) i.clienteId = null;
+    if (!i) return;
+    const ricollegato = _trovaClienteViaSeriale(i.seriale);
+    if (ricollegato) { i.clienteId = ricollegato.id; riconnessi++; }
+    else i.clienteId = null;
   });
   issues.appuntamentiClienteOrfano.forEach(x => {
     const a = (DB.appuntamenti || []).find(r => r.id === x.id);
-    if (a) a.clienteId = null;
+    if (!a) return;
+    const ricollegato = _trovaClienteViaSeriale(a.seriale);
+    if (ricollegato) { a.clienteId = ricollegato.id; riconnessi++; }
+    else a.clienteId = null;
   });
   issues.interventiFornitoreOrfano.forEach(x => {
     const i = DB.interventi.find(r => r.id === x.id);
@@ -11391,7 +11426,8 @@ function eseguiPuliziaDatiIncoerenti() {
   DB.save();
   renderAll();
   _renderReportIntegritaDati();
-  mostraToast(`✅ Ripuliti ${totale} riferimenti orfani.`, 'success');
+  const msgRiconnessi = riconnessi > 0 ? ` (${riconnessi} ricollegati al cliente corretto tramite matricola)` : '';
+  mostraToast(`✅ Ripuliti ${totale} riferimenti orfani${msgRiconnessi}.`, 'success');
 }
 
 function anteprimaRestore(event) {
