@@ -250,6 +250,7 @@
       animation: toastIn 0.2s ease-out;
       border: 1px solid var(--border);
     }
+    .toast span { white-space: pre-line; }
     @keyframes toastIn { from { transform: translateY(-8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
     .toast.success { border-left: 3px solid var(--success); }
     .toast.info { border-left: 3px solid var(--info); }
@@ -920,19 +921,19 @@
 
 <!-- NAV -->
 <nav class="glass">
-  <button class="active" onclick="showSection('dashboard')">📊 Dashboard</button>
-  <button onclick="showSection('clienti')">👤 Clienti</button>
-  <button onclick="showSection('appuntamenti')">📅 Appuntamenti</button>
-  <button onclick="showSection('interventi')">🔧 Interventi</button>
-  <button onclick="showSection('ricambi')">📦 Ricambi</button>
-  <button onclick="showSection('fornitori')">🏭 Fornitori</button>
-  <button onclick="showSection('inventario')">📋 Inventario</button>
-  <button onclick="showSection('bolle')">📄 Bolle</button>
+  <button class="active" data-section="dashboard" onclick="showSection('dashboard')">📊 Dashboard</button>
+  <button data-section="clienti" onclick="showSection('clienti')">👤 Clienti</button>
+  <button data-section="appuntamenti" onclick="showSection('appuntamenti')">📅 Appuntamenti</button>
+  <button data-section="interventi" onclick="showSection('interventi')">🔧 Interventi</button>
+  <button data-section="ricambi" onclick="showSection('ricambi')">📦 Ricambi</button>
+  <button data-section="fornitori" onclick="showSection('fornitori')">🏭 Fornitori</button>
+  <button data-section="inventario" onclick="showSection('inventario')">📋 Inventario</button>
+  <button data-section="bolle" onclick="showSection('bolle')">📄 Bolle</button>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
     <button id="navSyncBtn" class="btn-sync-nav" onclick="gestisciSyncNav()" title="Sincronizzazione Cloud">☁️ Cloud</button>
     <button id="navBackupBtn" class="btn-sync-nav btn-backup-nav" onclick="eseguiBackup()" title="Scarica subito un backup JSON">💾 Backup</button>
     <button id="btnColleghi" class="btn-sync-nav" onclick="apriColleghi()" title="Archivi colleghi" style="display:none;">👥 Colleghi</button>
-    <button onclick="showSection('impostazioni')">⚙️ Impostazioni</button>
+    <button data-section="impostazioni" onclick="showSection('impostazioni')">⚙️ Impostazioni</button>
   </div>
 </nav>
 
@@ -3869,7 +3870,16 @@ const DB = {
             return;
         }
         try {
-            const count = await dexieDB.clienti.count();
+            // "Dexie vuoto" = NESSUNA delle 8 tabelle contiene record. Prima si contava solo
+            // clienti: con 0 clienti ma ricambi/bolle/ordini presenti (e cache localStorage
+            // persa o mai scritta), il ramo di migrazione eseguiva clear()+bulkPut con la
+            // memoria (vuota o parziale), cancellando permanentemente gli archivi non-clienti.
+            const conteggi = await Promise.all([
+                dexieDB.clienti.count(), dexieDB.interventi.count(), dexieDB.ricambi.count(),
+                dexieDB.fornitori.count(), dexieDB.bolle.count(), dexieDB.ordini.count(),
+                dexieDB.inventari.count(), dexieDB.appuntamenti.count()
+            ]);
+            const count = conteggi.reduce((a, b) => a + b, 0);
             if (count > 0) {
                 console.log("🔄 Caricamento dati completi da IndexedDB (Dexie)...");
                 const [cli, inte, ric, forn, bol, ord, inv, app] = await Promise.all([
@@ -4041,6 +4051,10 @@ const DB = {
 
             // 3. Trigger asincroni (backup, cloud)
             try { if (typeof _scriviAutoBackup === 'function') _scriviAutoBackup(); } catch (e) {}
+            // Flag "ci sono modifiche locali potenzialmente non ancora caricate": usato da
+            // syncDown in modalità automatica per chiedere conferma prima di sostituire gli
+            // archivi locali con quelli del cloud (viene rimosso dopo un syncUp riuscito).
+            try { localStorage.setItem('ivd_dirty', '1'); } catch (e) {}
             try {
                 if (typeof SUPABASE !== 'undefined' && SUPABASE.isLoggedIn) {
                     if (!SUPABASE._syncDebounce) SUPABASE._syncDebounce = 0;
@@ -4200,7 +4214,7 @@ const DB = {
         }
     },
 
-    _version: 4,
+    _version: 5,
     _checkVersion() {
         const savedVersion = parseInt(localStorage.getItem('ivd_db_version') || '0');
         if (savedVersion >= this._version) return;
@@ -4248,6 +4262,18 @@ const DB = {
                     console.log(`📦 Migrazione: ricostruita ricezione storica per ordine ${o.numero} (${o.stato})`);
                 }
             });
+        }
+        if (fromVersion < 5) {
+            // BUG FIX: il backfill del createdAt (v2) copriva solo clienti e ricambi. Gli
+            // interventi/fornitori/bolle/ordini storici senza createdAt rendevano sempre
+            // FALSA la verifica anti-collisione del sync (stessoCreatedAt): una semplice
+            // rinomina legittima (es. correzione numero bolla) veniva scambiata per una
+            // collisione di id e il record veniva rinumerato, orfanando i riferimenti.
+            // Idempotente: tocca solo i record a cui manca il campo.
+            this.interventi.forEach(i => { if (i && !i.createdAt) i.createdAt = today(); });
+            this.fornitori.forEach(f => { if (f && !f.createdAt) f.createdAt = today(); });
+            this.bolle.forEach(b => { if (b && !b.createdAt) b.createdAt = today(); });
+            this.ordini.forEach(o => { if (o && !o.createdAt) o.createdAt = today(); });
         }
     },
 
@@ -4618,6 +4644,19 @@ function renderAll(section) {
 function openInventarioFisicoModal() {
   _inventarioFisicoFornitore = ''; // sessione manuale: nessun fornitore associato alle rettifiche
   _inventarioFisicoDaExcel = false;
+  // BUG FIX: lo stato della sessione precedente (righe scanner residue o riepilogo di un
+  // import Excel abbandonato) non veniva MAI ripulito — nessuna delle vie di chiusura
+  // (✕, backdrop, Escape) lo fa. Riaprendo lo scanner si ripartiva dal "Riepilogo
+  // Discrepanze" dell'import abbandonato e "Conferma aggiornamento" applicava al DB le
+  // quantità di quella sessione morta, sovrascrivendo giacenze nel frattempo modificate.
+  _inventarioFisico = [];
+  document.getElementById('inv_scanner_section').style.display = '';
+  document.getElementById('inv_preview_section').style.display = 'none';
+  const msg = document.getElementById('inv_risultato_scan');
+  if (msg) msg.innerHTML = '';
+  const input = document.getElementById('inv_scan_codice');
+  if (input) input.value = '';
+  renderTbInventarioFisico();
   document.getElementById('modalInventarioFisicoTitolo').textContent = '📱 Inventario Fisico (Scanner Barcode)';
   openModal('modalInventarioFisico');
   setTimeout(() => document.getElementById('inv_scan_codice').focus(), 300);
@@ -4669,22 +4708,23 @@ function aggiungiRigaInventarioFisico() {
 
 function renderTbInventarioFisico() {
   const tb = document.getElementById('tbInventarioFisico');
-  const empty = tb.querySelector('.inv-empty-row');
-  
+
+  // BUG FIX: con la lista vuota si DEVE ricostruire il tbody con la riga vuota. Il primo
+  // render non vuoto sostituiva l'intero innerHTML distruggendo la riga statica
+  // ".inv-empty-row": tutte le sessioni successive, tornando a zero righe, lasciavano a
+  // schermo le righe VECCHIE già rimosse dalla sessione (nessun segnale di tabella vuota).
   if (_inventarioFisico.length === 0) {
-    if (empty) empty.style.display = '';
+    tb.innerHTML = '<tr class="inv-empty-row"><td colspan="4"><div class="empty-state" style="padding:20px;"><p>Inizia scansionando un articolo</p></div></td></tr>';
     document.getElementById('inv_count').textContent = '0';
     return;
   }
-  
-  if (empty) empty.style.display = 'none';
-  
+
   tb.innerHTML = _inventarioFisico.map((row, idx) => `
     <tr>
       <td><strong>${escHtml(row.codice)}</strong></td>
       <td>${escHtml(trunc(row.descrizione, 40))}</td>
       <td style="text-align:center;">
-        <input type="number" min="0" value="${row.qta}" style="width:70px; text-align:center; font-weight:700;" onchange="modificaQtaInventarioFisico(${idx}, this.value)">
+        <input type="number" min="0" step="0.01" value="${row.qta}" style="width:70px; text-align:center; font-weight:700;" onchange="modificaQtaInventarioFisico(${idx}, this.value)">
       </td>
       <td style="text-align:center;">
         <button class="btn btn-ghost btn-sm btn-icon" onclick="rimuoviRigaInventarioFisico(${idx})" title="Rimuovi">🗑️</button>
@@ -4696,7 +4736,7 @@ function renderTbInventarioFisico() {
 }
 
 function modificaQtaInventarioFisico(idx, val) {
-  const q = parseInt(val) || 0;
+  const q = Math.round((parseFloat(String(val).replace(',', '.')) || 0) * 100) / 100;
   if (q <= 0) {
     rimuoviRigaInventarioFisico(idx);
   } else {
@@ -5043,7 +5083,7 @@ function eseguiAllineamentoGiacenzeExcel() {
     if (!codice || isNaN(qta)) { righeSaltate++; return; }
     const key = codice.toUpperCase();
     fileCodesSet.add(key);
-    if (!totali.has(key)) totali.set(key, { codiceOriginale: codice, qta: 0, lottiMap: new Map(), descrizione: '' });
+    if (!totali.has(key)) totali.set(key, { codiceOriginale: codice, qta: 0, lottiMap: new Map(), qtaSenzaLotto: 0, descrizione: '' });
     const entry = totali.get(key);
     entry.qta += qta;
 
@@ -5058,6 +5098,12 @@ function eseguiAllineamentoGiacenzeExcel() {
         const lKey = lottoRaw.toUpperCase();
         if (entry.lottiMap.has(lKey)) entry.lottiMap.get(lKey).qta += qta;
         else entry.lottiMap.set(lKey, { lottoOriginale: lottoRaw, qta });
+      } else {
+        // Riga con BATCH vuoto in un file che lo prevede: la sua quantità va tracciata a
+        // parte, altrimenti alla conferma (che ricalcola il totale come SOMMA DEI LOTTI)
+        // le unità delle righe senza lotto sparivano in silenzio (file: 15 totali =
+        // "LOT-A: 10" + riga senza lotto da 5 → salvato 10).
+        entry.qtaSenzaLotto += qta;
       }
     }
   });
@@ -5069,16 +5115,25 @@ function eseguiAllineamentoGiacenzeExcel() {
 
   const nonTrovati = [];
   _inventarioFisico = [];
-  totali.forEach(({ codiceOriginale, qta, lottiMap, descrizione }, key) => {
+  totali.forEach(({ codiceOriginale, qta, lottiMap, qtaSenzaLotto, descrizione }, key) => {
     const r = DB.ricambi.find(x => String(x.codice || '').toUpperCase() === key);
-    const lottiExcel = lottiMap.size > 0
-      ? [...lottiMap.values()].map(l => ({ lotto: l.lottoOriginale, qta: Math.max(0, Math.round(l.qta)) }))
+    // Quantità con 2 decimali (come il resto dell'app: movimenti, lotti, giacenze). Prima
+    // Math.round() intero tronca silenziosamente le giacenze decimali del file (2,5 kg → 3).
+    const arrotonda = (x) => Math.max(0, Math.round(x * 100) / 100);
+    let lottiExcel = lottiMap.size > 0
+      ? [...lottiMap.values()].map(l => ({ lotto: l.lottoOriginale, qta: arrotonda(l.qta) }))
       : [];
+    if (lottiExcel.length && qtaSenzaLotto > 0) {
+      // Righe miste (parte con BATCH, parte senza): la parte senza lotto diventa un lotto
+      // sintetico di rettifica, così la somma dei lotti resta uguale al totale del file e
+      // nessuna unità viene persa nella ricalcolo della conferma.
+      lottiExcel = lottiExcel.concat([{ lotto: '(SENZA BATCH)', qta: arrotonda(qtaSenzaLotto) }]);
+    }
     if (!r) {
-      nonTrovati.push({ codice: codiceOriginale, descrizione, qta: Math.max(0, Math.round(qta)), lottiExcel });
+      nonTrovati.push({ codice: codiceOriginale, descrizione, qta: arrotonda(qta), lottiExcel });
       return;
     }
-    const item = { id: r.id, codice: r.codice, descrizione: r.descrizione, qta: Math.max(0, Math.round(qta)) };
+    const item = { id: r.id, codice: r.codice, descrizione: r.descrizione, qta: arrotonda(qta) };
     if (hasLottoMapping && lottiExcel.length) item.lottiExcel = lottiExcel;
     _inventarioFisico.push(item);
   });
@@ -5213,7 +5268,7 @@ function creaArticoliMancantiExcel() {
       fornitore: _articoliMancantiExcelFornitore || '',
       note: 'Importato da allineamento Excel (articolo mancante dall\'archivio)'
     }));
-    DB.ricambi.push({
+    const nuovo = {
       id: nuovoId,
       codice: a.codice,
       descrizione: a.descrizione.trim(),
@@ -5226,9 +5281,15 @@ function creaArticoliMancantiExcel() {
       prezzo: 0,
       lead: 0,
       note: 'Creato da allineamento Excel: articolo presente nel file ma non in archivio.',
-      lotti,
-      createdAt: today()
-    });
+      createdAt: new Date().toISOString()
+    };
+    // BUG FIX: prima veniva impostato sempre `lotti` — anche come array VUOTO quando il
+    // file non aveva lotti. Un `lotti: []` significa "gestione a lotti attiva" per
+    // syncRicambioQta (che ricalcola qta = somma lotti = 0): alla prima movimentazione la
+    // giacenza importata veniva AZZERATA. Senza lotto il ricambio deve restare a sola
+    // quantità (lotti non definito).
+    if (lotti.length) nuovo.lotti = lotti;
+    DB.ricambi.push(nuovo);
     creati++;
   });
 
@@ -5383,20 +5444,37 @@ function renderInventarioDettagliato() {
 function exportInventarioDettagliatoExcel() {
   const flattened = [];
   DB.ricambi.forEach(r => {
-    (r.lotti || []).forEach(l => {
-      if (l.qta > 0) {
-        flattened.push({
-          'Codice': r.codice,
-          'Descrizione': r.descrizione,
-          'Lotto': l.lotto || '—',
-          'Quantità': l.qta,
-          'U.M.': r.um || 'pz',
-          'Scadenza': l.scadenza ? fmtDate(l.scadenza) : '—',
-          'Fornitore': l.fornitore || r.fornitore || '—',
-          'Data Carico': l.carico ? fmtDate(l.carico) : '—'
-        });
-      }
+    if (!r) return;
+    // Stessa semantica della tabella a schermo (renderInventarioDettagliato): lotti con
+    // giacenza positiva, oppure — per gli articoli a sola quantità senza lotti — una riga
+    // "(Nessun lotto)". Prima gli articoli senza lotti attivi MANCAVANO del tutto
+    // dall'export/PDF: l'inventario stampato per il conteggio fisico non corrispondeva
+    // alla tabella a video.
+    const lottiAttivi = (r.lotti || []).filter(l => l && l.qta > 0);
+    lottiAttivi.forEach(l => {
+      flattened.push({
+        'Codice': r.codice,
+        'Descrizione': r.descrizione,
+        'Lotto': l.lotto || '—',
+        'Quantità': l.qta,
+        'U.M.': r.um || 'pz',
+        'Scadenza': l.scadenza ? fmtDate(l.scadenza) : '—',
+        'Fornitore': l.fornitore || r.fornitore || '—',
+        'Data Carico': l.carico ? fmtDate(l.carico) : '—'
+      });
     });
+    if (lottiAttivi.length === 0 && (parseFloat(r.qta) || 0) > 0) {
+      flattened.push({
+        'Codice': r.codice,
+        'Descrizione': r.descrizione,
+        'Lotto': '(Nessun lotto)',
+        'Quantità': Math.round((parseFloat(r.qta) || 0) * 100) / 100,
+        'U.M.': r.um || 'pz',
+        'Scadenza': '—',
+        'Fornitore': r.fornitore || '—',
+        'Data Carico': '—'
+      });
+    }
   });
   
   if (flattened.length === 0) { mostraToast('Nessun dato da esportare.', 'info'); return; }
@@ -5415,18 +5493,30 @@ function exportInventarioDettagliatoExcel() {
 function anteprimaPDFInventarioDettagliato() {
   const rows = [];
   DB.ricambi.forEach(r => {
-    (r.lotti || []).forEach(l => {
-      if (l.qta > 0) {
-        rows.push({
-          'Codice': r.codice,
-          'Descrizione': r.descrizione,
-          'Lotto': l.lotto || '—',
-          'Quantità': `${l.qta} ${r.um||'pz'}`,
-          'Scadenza': l.scadenza ? fmtDate(l.scadenza) : '—',
-          'Fornitore': l.fornitore || r.fornitore || '—'
-        });
-      }
+    if (!r) return;
+    // Come sopra: allineato alla tabella a schermo, include anche gli articoli a sola
+    // quantità (senza lotti) come riga "(Nessun lotto)".
+    const lottiAttivi = (r.lotti || []).filter(l => l && l.qta > 0);
+    lottiAttivi.forEach(l => {
+      rows.push({
+        'Codice': r.codice,
+        'Descrizione': r.descrizione,
+        'Lotto': l.lotto || '—',
+        'Quantità': `${l.qta} ${r.um||'pz'}`,
+        'Scadenza': l.scadenza ? fmtDate(l.scadenza) : '—',
+        'Fornitore': l.fornitore || r.fornitore || '—'
+      });
     });
+    if (lottiAttivi.length === 0 && (parseFloat(r.qta) || 0) > 0) {
+      rows.push({
+        'Codice': r.codice,
+        'Descrizione': r.descrizione,
+        'Lotto': '(Nessun lotto)',
+        'Quantità': `${Math.round((parseFloat(r.qta) || 0) * 100) / 100} ${r.um||'pz'}`,
+        'Scadenza': '—',
+        'Fornitore': r.fornitore || '—'
+      });
+    }
   });
   
   if (rows.length === 0) { mostraToast('Nessun dato da stampare.', 'info'); return; }
@@ -5451,12 +5541,12 @@ function showSection(id) {
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
   document.getElementById('section-' + id).classList.add('active');
-  const navIds = ['dashboard','clienti','appuntamenti','interventi','ricambi','fornitori','inventario','bolle','impostazioni'];
-  const idx = navIds.indexOf(id);
-  if (idx !== -1) {
-    const navBtns = document.querySelectorAll('nav button');
-    if (navBtns[idx]) navBtns[idx].classList.add('active');
-  }
+  // Evidenzia il bottone nav per ATTRIBUTO data-section, non per posizione: prima si usava
+  // l'indice nella lista dei soli showSection, ma nel DOM tra i bottoni ci sono anche
+  // Cloud/Backup/Colleghi — "Impostazioni" risultava quindi MAI evidenziata (si illuminava
+  // il bottone "☁️ Cloud").
+  const navBtn = document.querySelector('nav button[data-section="' + id + '"]');
+  if (navBtn) navBtn.classList.add('active');
   renderAll(id);
 }
 
@@ -5764,6 +5854,7 @@ function _renderAnteprimaVerbaleIframe() {
       animation: toastIn 0.35s cubic-bezier(0.25, 0.1, 0.25, 1);
       border: 0.5px solid rgba(0, 0, 0, 0.08);
     }
+    .toast span { white-space: pre-line; }
     @keyframes toastIn { from { transform: translateX(20px) scale(0.96); opacity: 0; } to { transform: translateX(0) scale(1); opacity: 1; } }
     .toast.success { background: rgba(52, 199, 89, 0.12); border-color: rgba(52, 199, 89, 0.2); }
     .toast.info { background: rgba(0, 122, 255, 0.12); border-color: rgba(0, 122, 255, 0.2); }
@@ -6530,13 +6621,37 @@ const _debRenderRicambi = _debounce(() => renderRicambi());
 
 // ======================== MODALI ========================
 let _openModalCount = 0;
+const _modalStack = []; // id delle modali aperte, dalla più recente alla cima (ultimo = top)
+
+// Cleanup specifici per le chiusure che NON passano dai pulsanti ✕/Annulla della modale
+// (tasto Escape): senza, le variabili di stato del flusso restavano armate. Esempi reali:
+// la coda di conversione appuntamento→intervento non veniva svuotata e agganciava lo
+// strumento al PROSSIMO intervento salvato (di qualunque cliente); la catena guidata
+// dell'import Excel si interrompeva in silenzio senza aggiornare le giacenze.
+const _modalCleanup = {
+  modalIntervento: () => { _codaConversioneAppuntamento = null; closeModal('modalIntervento'); },
+  modalArticoliMancantiExcel: () => { ignoraArticoliMancantiExcel(); }
+};
+
+function _rimuoviDalStack(id) {
+  const idx = _modalStack.lastIndexOf(id);
+  if (idx !== -1) _modalStack.splice(idx, 1);
+  _openModalCount = _modalStack.length;
+  if (_openModalCount <= 0) {
+    _openModalCount = 0;
+    document.body.style.overflow = '';
+  }
+}
 
 function openModal(id) {
   const el = document.getElementById(id);
   if (!el) { console.warn('openModal: elemento non trovato', id); return; }
-  el.classList.add('open');
+  if (!el.classList.contains('open')) {
+    el.classList.add('open');
+    _modalStack.push(id);
+  }
+  _openModalCount = _modalStack.length;
   el.focus();
-  _openModalCount++;
   document.body.style.overflow = 'hidden';
 }
 
@@ -6544,24 +6659,22 @@ function closeModal(id) {
   const el = document.getElementById(id);
   if (!el) { console.warn('closeModal: elemento non trovato', id); return; }
   el.classList.remove('open');
-  _openModalCount = Math.max(0, _openModalCount - 1);
-  if (_openModalCount <= 0) {
-    _openModalCount = 0;
-    document.body.style.overflow = '';
-  }
+  _rimuoviDalStack(id);
 }
 
-// Chiudi con Escape
+// Chiudi con Escape: chiude la modale IN CIMA allo stack (l'ultima aperta), non la prima
+// in ordine DOM. Prima, con il pad firma aperto sopra la scheda cliente/intervento,
+// Escape chiudeva la scheda sottostante (perdendo di vista le modifiche non salvate)
+// lasciando aperto il pad; e le modali con cleanup specifico non eseguivano nessuna pulizia.
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    const open = document.querySelector('.modal-overlay.open');
-    if (open) {
-      open.classList.remove('open');
-      _openModalCount = Math.max(0, _openModalCount - 1);
-      if (_openModalCount <= 0) {
-        _openModalCount = 0;
-        document.body.style.overflow = '';
-      }
+    const top = _modalStack[_modalStack.length - 1];
+    if (!top) return;
+    if (_modalCleanup[top]) { _modalCleanup[top](); return; }
+    const el = document.getElementById(top);
+    if (el) {
+      el.classList.remove('open');
+      _rimuoviDalStack(top);
     }
   }
 });
@@ -6672,6 +6785,10 @@ const SUPABASE = {
     if (!email || !password) { mostraToast('Inserisci email e password.', 'warning'); return; }
     
     const sb = this.getClient();
+    // Senza questo guard, con credenziali non configurate (o libreria CDN non caricata,
+    // es. rete aziendale che blocca jsdelivr) sb.auth lanciava un TypeError su null
+    // senza nessun messaggio per l'utente.
+    if (!sb) { mostraToast('Cloud non configurato: imposta URL e chiave Supabase nelle Impostazioni (e verifica la connessione).', 'warning'); return; }
     const { data, error } = await sb.auth.signInWithPassword({ email, password });
     if (error) {
       mostraToast('Errore login: ' + error.message, 'danger');
@@ -6686,7 +6803,7 @@ const SUPABASE = {
 
   async logout() {
     const sb = this.getClient();
-    await sb.auth.signOut();
+    if (sb) await sb.auth.signOut();
     this._session = null;
     this.isLoggedIn = false;
     this.onLogout();
@@ -6745,13 +6862,58 @@ const SUPABASE = {
 
   async _downloadTable(tbl, userId) {
     const sb = this.getClient();
-    const { data: records, error } = await sb.from(tbl).select('data').eq('user_id', userId);
-    if (error || !records || !records.length) return null;
-    return records.map(r => r.data);
+    // Paginazione obbligatoria: PostgREST (Supabase) tronca silenziosamente ogni query a
+    // 1000 righe se non si richiedono esplicitamente le pagine successive. Con l'archivio
+    // che cresce, il download parziale rimpiazzava gli archivi locali con un sottoinsieme
+    // arbitrario e il syncUp successivo cancellava dal cloud tutto il resto: perdita
+    // permanente. Si scaricano blocchi da 1000 finché l'ultimo non è pieno.
+    const PAGE = 1000;
+    const all = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data: records, error } = await sb.from(tbl).select('data').eq('user_id', userId).range(from, from + PAGE - 1);
+      if (error) return { errore: true };
+      if (records) all.push(...records);
+      if (!records || records.length < PAGE) break;
+    }
+    // Distinzione importante: array vuoto = query riuscita, tabella VUOTA sul cloud
+    // (cancellazione legittima da propagare); null = errore di rete/query (non toccare
+    // i dati locali). Prima entrambi i casi restituivano null e una tabella svuotata
+    // dall'altro dispositivo non si propagava mai: i record "cancellati" risuscitavano.
+    return { errore: false, righe: all.map(r => r.data) };
   },
 
   _downloadAll(tables, userId) {
-    return Promise.all(tables.map(tbl => this._downloadTable(tbl, userId).then(data => ({ tbl, data }))));
+    return Promise.all(tables.map(tbl => this._downloadTable(tbl, userId).then(res => ({ tbl, res }))));
+  },
+
+  // true dopo il primo download completato con successo su questo dispositivo. Finché è
+  // false, il dispositivo non può considerarsi "allineato": le sue tabelle locali vuote
+  // potrebbero semplicemente non essere mai state scaricate. In quel caso syncUp NON deve
+  // cancellare dal cloud gli id "assenti in locale" — con gli archivi locali vuoti
+  // cancellerebbe TUTTO il cloud (perdita dati totale sul dispositivo appena configurato,
+  // es. se il primo download fallisce per rete o viene rifiutato dall'utente).
+  _haMaiScaricato() {
+    return localStorage.getItem('ivd_sync_downloaded') === '1';
+  },
+
+  // Cache localStorage leggera per le scritture di syncDown: stessi campi pesanti (PDF e
+  // firme in base64) esclusi da DB._cacheToLocalStorage. Prima syncDown serializzava i
+  // record INTERI: bastavano un paio di PDF multi-MB a superare la quota di localStorage
+  // con un QuotaExceeded a metà ciclo — tabelle parzialmente rimpiazzate in memoria e
+  // toast fuorviante "Errore connessione Supabase". I dati completi restano comunque su
+  // IndexedDB (DB._saveToDexie chiamata sotto) e sul cloud.
+  _cacheLeggera(tbl, records) {
+    if (tbl === 'clienti') {
+      return records.map(c => (!c.firme || !c.firme.length) ? c : { ...c, firme: c.firme.map(({ dataUrl, ...resto }) => resto) });
+    }
+    if (tbl === 'interventi') {
+      return records.map(i => {
+        if (!i.pdfMerckData && !i.pdfMerckDataOriginale && !i.pdfMerckFirma && !i.firmaClienteImg) return i;
+        const { pdfMerckData, pdfMerckDataOriginale, pdfMerckFirma, firmaClienteImg, ...resto } = i;
+        return resto;
+      });
+    }
+    return records;
   },
 
   // Upload di un singolo archivio verso Supabase: upsert dei record presenti in locale +
@@ -6780,16 +6942,32 @@ const SUPABASE = {
     // restava per sempre nel cloud e tornava indietro a ogni successivo download (i
     // record "fantasma" segnalati dall'utente). Qui si rimuovono dal cloud gli id che
     // esistevano lì ma non sono più presenti in locale.
-    const { data: cloudIdRows, error: idsErr } = await sb.from(table).select('id').eq('user_id', userId);
-    if (idsErr) {
-      console.warn(`[Supabase] Errore lettura id cloud per ${table}:`, idsErr.message);
-    } else if (cloudIdRows && cloudIdRows.length) {
-      const idsToDelete = cloudIdRows.map(r => r.id).filter(id => !localIds.has(id));
-      if (idsToDelete.length) {
-        const { error: delErr } = await sb.from(table).delete().eq('user_id', userId).in('id', idsToDelete);
-        if (delErr) console.warn(`[Supabase] Errore cancellazione ${table}:`, delErr.message);
-        else console.log(`[Supabase] Rimossi ${idsToDelete.length} record cancellati da ${table}`);
+    // GUARDIA ANTI-PERDITA DATI: la cancellazione gira solo se questo dispositivo ha
+    // COMPLETATO almeno un download (_haMaiScaricato). Su un dispositivo mai allineato
+    // (prima apertura, download fallito o rifiutato) gli archivi locali sono vuoti o
+    // parziali: cancellare gli id "assenti in locale" svuoterebbe il cloud di tabelle
+    // intere mai scaricate, e l'altro dispositivo si allineerebbe al vuoto.
+    if (!this._haMaiScaricato()) {
+      console.log(`[Supabase] Deletion skip per ${table}: dispositivo mai allineato col cloud (nessun download completato).`);
+      return;
+    }
+    const PAGE_IDS = 1000;
+    let idsToDelete = [];
+    for (let from = 0; ; from += PAGE_IDS) {
+      const { data: cloudIdRows, error: idsErr } = await sb.from(table).select('id').eq('user_id', userId).range(from, from + PAGE_IDS - 1);
+      if (idsErr) {
+        console.warn(`[Supabase] Errore lettura id cloud per ${table}:`, idsErr.message);
+        idsToDelete = [];
+        break;
       }
+      const rows = cloudIdRows || [];
+      idsToDelete.push(...rows.map(r => r.id).filter(id => !localIds.has(id)));
+      if (rows.length < PAGE_IDS) break;
+    }
+    if (idsToDelete.length) {
+      const { error: delErr } = await sb.from(table).delete().eq('user_id', userId).in('id', idsToDelete);
+      if (delErr) console.warn(`[Supabase] Errore cancellazione ${table}:`, delErr.message);
+      else console.log(`[Supabase] Rimossi ${idsToDelete.length} record cancellati da ${table}`);
     }
   },
 
@@ -6847,6 +7025,7 @@ const SUPABASE = {
       if (cfgErr) throw new Error(`Errore upsert user_config: ${cfgErr.message}`);
 
       localStorage.setItem('ivd_last_sync', nowLocal);
+      localStorage.removeItem('ivd_dirty'); // modifiche locali ora tutte caricate
       console.log('[Supabase] Sync Up completato');
       mostraToast('☁️ Dati sincronizzati su Supabase', 'success');
     } catch (e) {
@@ -6885,13 +7064,24 @@ const SUPABASE = {
         return false;
       }
 
+      // Protezione del lavoro offline: in modalità automatica (all'avvio dell'app) il
+      // download sostituisce INTEGRALMENTE gli archivi locali. Se ci sono modifiche locali
+      // mai caricate con successo (ivd_dirty: l'ultimo syncUp è fallito, es. rete assente
+      // durante una giornata fuori sede), il replace silenzioso le perderebbe senza alcun
+      // avviso. In quel caso si chiede conferma, come già avviene per il download manuale.
+      if (!isManual && localStorage.getItem('ivd_dirty') === '1') {
+        if (!confirm('⚠️ Ci sono modifiche locali non ancora sincronizzate (l\'ultimo upload verso il cloud è fallito o non è mai stato completato).\n\nScaricare i dati dal cloud ora sovrascriverà le copie locali non ancora caricate. Continuare?\n\nSuggerimento: riconnettiti alla rete e salva un\'azione qualsiasi per caricare prima le modifiche locali.')) return false;
+      }
+
       if (isManual) {
         if (!confirm(`Supabase: Trovati dati più recenti (del ${new Date(cloudCfg.last_update).toLocaleString()}). Caricarli?\n\n⚠️ I PDF Merck allegati localmente non verranno sovrascritti.`)) return false;
       }
 
-      // 'appuntamenti' incluso qui senza bisogno di isolamento: _downloadTable() già
-      // restituisce null (mai un throw) se la tabella manca o la query fallisce, e il ciclo
-      // sotto salta con "if (!data) continue" — nessun rischio di bloccare le altre tabelle.
+      // 'appuntamenti' incluso qui senza bisogno di isolamento: _downloadTable() ora
+      // restituisce { errore: true } se la query fallisce (mai un throw) e il ciclo
+      // sotto salta con "if (res.errore) continue" — nessun rischio di bloccare le altre
+      // tabelle. Una tabella vuota ma QUERIATA con successo è una cancellazione legittima
+      // da propagare, non un errore.
       const tableNames = ['clienti', 'interventi', 'ricambi', 'fornitori', 'bolle', 'ordini', 'inventari', 'appuntamenti'];
       const results = await this._downloadAll(tableNames, userId);
       let okCount = 0;
@@ -6909,20 +7099,14 @@ const SUPABASE = {
       const ID_TYPE = { clienti: 'cliente', interventi: 'intervento', ricambi: 'ricambio', fornitori: 'fornitore', bolle: 'bolla', ordini: 'ordine' };
       let collisioneRilevata = false;
 
-      for (const { tbl, data } of results) {
-        if (!data) continue;
-        let records = data;
-        if (tbl === 'interventi') {
-          const locali = DB.interventi;
-          records = data.map(ci => { const li = locali.find(x => x.id === ci.id); return li && (li.pdfMerckData || li.pdfMerckFirma) ? { ...ci, pdfMerckData: li.pdfMerckData, pdfMerckFirma: li.pdfMerckFirma, pdfMerckFirmaData: li.pdfMerckFirmaData, pdfMerckNome: li.pdfMerckNome || ci.pdfMerckNome } : ci; });
-          // BUG FIX: qui c'era anche un "ripristina i locali assenti dal cloud" (locali.forEach
-          // push...) pensato per non perdere interventi creati in locale e non ancora
-          // caricati. Ma ora che syncUp() propaga correttamente anche le cancellazioni,
-          // un intervento "assente dal cloud" è quasi sempre uno cancellato altrove — questa
-          // riga lo faceva riapparire ad ogni download, vanificando la cancellazione
-          // (esattamente il bug segnalato dall'utente). Il set scaricato dal cloud è ora
-          // trattato come autorevole, senza più questo ripristino automatico.
-        }
+      for (const { tbl, res } of results) {
+        if (!res || res.errore) continue;
+        let records = res.righe;
+        // Tabella vuota sul cloud ma query riuscita: è una cancellazione totale fatta
+        // altrove e va propagata — MA solo su un dispositivo già allineato. Al primo
+        // download una tabella cloud vuota non deve azzerare l'archivio locale (che
+        // potrebbe contenere dati ancora mai caricati).
+        if (records.length === 0 && !this._haMaiScaricato()) continue;
 
         const idField = IDENTITY_FIELD[tbl];
         if (idField) {
@@ -6944,7 +7128,11 @@ const SUPABASE = {
             // Si rinumera quindi solo se ANCHE il createdAt differisce (o manca): se i due
             // createdAt coincidono, si tratta con altissima probabilità dello stesso record
             // modificato altrove, e va semplicemente aggiornato mantenendo il suo id.
-            const stessoCreatedAt = localMatch && localMatch.createdAt && rec.createdAt && localMatch.createdAt === rec.createdAt;
+            // I record creati con le versioni attuali hanno createdAt con orario completo
+            // (ISO): due record diversi creati lo stesso giorno su due dispositivi hanno
+            // timestamp quasi certamente diversi, quindi la collisione viene vista anche
+            // nel caso più comune (stesso giorno di lavoro offline).
+            const stessoCreatedAt = !!(localMatch && localMatch.createdAt && rec.createdAt && localMatch.createdAt === rec.createdAt);
             if (localMatch && localVal !== cloudVal && (localVal || cloudVal) && !stessoCreatedAt) {
               console.warn(`[Supabase] Collisione ID su ${tbl} (id ${rec.id}): locale="${localVal}" vs cloud="${cloudVal}" — rinumero il record dal cloud.`);
               collisioneRilevata = true;
@@ -6954,8 +7142,25 @@ const SUPABASE = {
           });
         }
 
+        // Merge dei PDF Merck/firme locali DOPO la rinumerozione: se l'id era una collisione
+        // e il record è stato rinumerato, i PDF del record locale NON devono finire sul
+        // record rinumerato (prima il merge per id avveniva prima del check e attaccava i
+        // PDF locali a un record cloud estraneo che per caso condivideva l'id).
+        if (tbl === 'interventi') {
+          const locali = DB.interventi;
+          records = records.map(ci => { const li = locali.find(x => x.id === ci.id); return li && (li.pdfMerckData || li.pdfMerckFirma) ? { ...ci, pdfMerckData: li.pdfMerckData, pdfMerckFirma: li.pdfMerckFirma, pdfMerckFirmaData: li.pdfMerckFirmaData, pdfMerckNome: li.pdfMerckNome || ci.pdfMerckNome } : ci; });
+          // BUG FIX: qui c'era anche un "ripristina i locali assenti dal cloud" (locali.forEach
+          // push...) pensato per non perdere interventi creati in locale e non ancora
+          // caricati. Ma ora che syncUp() propaga correttamente anche le cancellazioni,
+          // un intervento "assente dal cloud" è quasi sempre uno cancellato altrove — questa
+          // riga lo faceva riapparire ad ogni download, vanificando la cancellazione
+          // (esattamente il bug segnalato dall'utente). Il set scaricato dal cloud è ora
+          // trattato come autorevole, senza più questo ripristino automatico.
+        }
+
         DB[tbl] = records;
-        localStorage.setItem(`ivd_${tbl}`, JSON.stringify(records));
+        localStorage.setItem(`ivd_${tbl}`, JSON.stringify(this._cacheLeggera(tbl, records)));
+        if (!this._haMaiScaricato()) localStorage.setItem('ivd_sync_downloaded', '1');
         okCount++;
       }
 
@@ -7047,7 +7252,10 @@ async function apriColleghi() {
 
   let users = await SUPABASE.listUsers();
   if (users.length === 0 && SUPABASE.currentUser) {
-    users = [{ key: SUPABASE.currentUser, name: SUPABASE.currentUser, lastUpdate: null, stats: {} }];
+    // Fallback se user_config non è leggibile: la key DEVE essere l'UUID dell'utente
+    // (currentUserId), non l'email — caricaDatiCollega e loadUserData filtrano per
+    // user_id, quindi con l'email come chiave la query dell'archivio tornava sempre vuota.
+    users = [{ key: SUPABASE.currentUserId || SUPABASE.currentUser, name: SUPABASE.currentUser, lastUpdate: null, stats: {} }];
   }
   if (!users.length) {
     container.innerHTML = '<p style="text-align:center;padding:20px;color:var(--text-muted);">Nessun collega trovato. Invitali a configurare lo stesso cloud Supabase.</p>';
@@ -7207,14 +7415,16 @@ function mostraToast(msg, type = 'info') {
 
 function fmtDate(d) {
   if (!d) return '—';
-  const [yyyy, mm, dd] = d.split('-');
+  // Alcuni campi (createdAt) ora contengono timestamp ISO completo "…T…": si estrae la
+  // sola parte data prima dello split, altrimenti l'orario finirebbe nel giorno stampato.
+  const [yyyy, mm, dd] = String(d).split('T')[0].split('-');
   if (!yyyy || !mm || !dd) return '—';
   return `${dd}-${mm}-${yyyy}`;
 }
 
 function fmtDateShort(d) {
   if (!d) return '—';
-  const parts = d.split('-');
+  const parts = String(d).split('T')[0].split('-');
   if (parts.length < 3) return d;
   const [yyyy, mm, dd] = parts;
   return `${dd}-${mm}`;
@@ -7240,6 +7450,23 @@ const trunc = (s, n = 20) => {
 function today() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// Data "AAAA-MM-GG" da un timestamp/parsable, SEMPRE in orario locale: stesso motivo del fix
+// sopra, ma per istanti non-«adesso» (es. data di una firma salvata come ISO completo).
+// Prima, new Date(ts).toISOString().split('T')[0] restituiva il giorno precedente per ogni
+// istante tra mezzanotte e l'1-2 di notte in fusi avanti su UTC.
+function dataLocaleDa(ts) {
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// Ultimo giorno del mese (per default "Mese corrente" dei filtri/export): costruito in
+// orario locale. Prima, new Date(y, m, 0).toISOString() perdeva un giorno in Europe/Rome,
+// escludendo sistematicamente gli interventi dell'ultimo giorno del mese dai totali.
+function fineMeseLocale(y, mZeroBased) {
+  return `${y}-${String(mZeroBased + 1).padStart(2,'0')}-${String(new Date(y, mZeroBased + 1, 0).getDate()).padStart(2,'0')}`;
 }
 
 function statoBadge(s) {
@@ -7284,7 +7511,9 @@ function renderDashboard() {
   // Aggiorna fatturato solo se già rivelato dall'utente
   const elFatt = document.getElementById('stat-fatturato');
   if (elFatt && elFatt.dataset.visibile === '1') {
-    const tot = (DB.interventi || []).reduce((acc, i) => acc + (parseFloat(i ? i.importoTotale : 0) || 0), 0);
+    // Esclude gli interventi Annullati: un annullato con tariffe fornitore impostate
+    // gonfiava il totale anche se non è mai stato un lavoro fatturabile.
+    const tot = (DB.interventi || []).reduce((acc, i) => (i && i.stato === 'Annullato') ? acc : acc + (parseFloat(i.importoTotale) || 0), 0);
     elFatt.textContent = Math.round(tot).toLocaleString('it-IT') + ' €';
   }
 
@@ -7296,7 +7525,7 @@ function renderDashboard() {
     if (critici.length > 0) {
       const mostrati = critici.slice(0, 10);
       const altri = critici.length > 10 ? `... e altri ${critici.length - 10}` : '';
-      alerts.innerHTML += `<div class="alert alert-danger">⛔ <strong>${critici.length} ricambi esauriti:</strong> ${mostrati.map(r=>r.descrizione).join(', ')} ${altri}</div>`;
+      alerts.innerHTML += `<div class="alert alert-danger">⛔ <strong>${critici.length} ricambi esauriti:</strong> ${mostrati.map(r=>escHtml(r.descrizione)).join(', ')} ${altri}</div>`;
     }
   }
 
@@ -7646,12 +7875,16 @@ function _salvaClienteImpl() {
   };
   if (editClienteId) {
     const idx = DB.clienti.findIndex(c => c.id === editClienteId);
+    // Guard: il record può essere sparito nel frattempo (sync cloud/restore con il modal
+    // aperto). Prima un idx=-1 crashava qui (TypeError su undefined.firme) o scriveva
+    // sull'indice -1 perdendo la modifica in silenzio.
+    if (idx === -1) { mostraToast('⚠️ Il cliente non esiste più in archivio (sincronizzato o eliminato da un altro dispositivo?): modifica non salvata.', 'warning'); return; }
     // Preserva le firme esistenti
     if (DB.clienti[idx].firme) obj.firme = DB.clienti[idx].firme;
     DB.clienti[idx] = { ...DB.clienti[idx], ...obj };
   } else {
     obj.id = DB.nextId('cliente');
-    obj.createdAt = today();
+    obj.createdAt = new Date().toISOString();
     DB.clienti.push(obj);
   }
   DB.save();
@@ -8676,11 +8909,22 @@ function _salvaInterventoImpl() {
     }
   }
 
+  // Guard anti-sync: il record può essere sostituito/rimosso da un download mentre il
+  // modal è aperto. Prima la modifica andava su DB.interventi[-1] e spariva in silenzio
+  // (e le giacenze erano già state reintegrate/scaricate sopra).
+  if (editInterventoId && !DB.interventi.some(x => x.id === editInterventoId)) {
+    mostraToast('⚠️ L\'intervento non esiste più in archivio (sincronizzato o eliminato da un altro dispositivo?): modifica non salvata.', 'warning');
+    return;
+  }
+
   const partsOld = editInterventoId ? (DB.interventi.find(x=>x.id===editInterventoId)||{}).ricambi||[] : [];
   const partsNew = getPartsFromRows();
 
   const obj = {
-    numero: document.getElementById('i_numero').value,
+    // Usa il valore GIA' trimmato (numeroInserito): prima veniva salvato il numero grezzo,
+    // così "WO-0012␣" (con spazio finale) passava il controllo duplicati e creava due
+    // interventi visivamente identici.
+    numero: numeroInserito,
     data, oraInizio: document.getElementById('i_ora_inizio').value,
     oraFine: document.getElementById('i_ora_fine').value,
     stato: document.getElementById('i_stato').value,
@@ -8773,7 +9017,7 @@ function _salvaInterventoImpl() {
   } else {
     partsNew.forEach(p => scaricaPart(p));
     obj.id = DB.nextId('intervento');
-    obj.createdAt = today();
+    obj.createdAt = new Date().toISOString();
     DB.interventi.push(obj);
   }
 
@@ -8785,7 +9029,17 @@ function _salvaInterventoImpl() {
     const app = DB.appuntamenti.find(x => x.id === _codaConversioneAppuntamento);
     if (app) {
       const strumenti = _elencoStrumentiAppuntamento(app);
-      const prossimo = strumenti.find(s => !s.interventoId);
+      // Collega lo strumento che corrisponde a quello realmente lasciato nel form
+      // (modello e, se entrambi presenti, seriale): prima si collegava sempre il PRIMO
+      // strumento non ancora convertito, anche se l'utente aveva cambiato strumento prima
+      // di salvare — l'appuntamento segnava come convertito quello sbagliato e alla
+      // successiva iterazione della coda nasceva un intervento duplicato.
+      const formModello = (document.getElementById('i_strumento')?.value || '').trim().toLowerCase();
+      const formSeriale = (document.getElementById('i_seriale')?.value || '').trim().toLowerCase();
+      const prossimo = strumenti.find(s => !s.interventoId &&
+          (!formModello || String(s.modello || '').trim().toLowerCase() === formModello) &&
+          (!formSeriale || !s.seriale || String(s.seriale || '').trim().toLowerCase() === formSeriale))
+        || strumenti.find(s => !s.interventoId);
       if (prossimo) prossimo.interventoId = editInterventoId || obj.id;
       app.strumenti = strumenti;
     } else {
@@ -9140,7 +9394,7 @@ function _persistiAppuntamentoDaForm() {
     return editAppuntamentoId;
   } else {
     obj.id = DB.nextId('appuntamento');
-    obj.createdAt = today();
+    obj.createdAt = new Date().toISOString();
     DB.appuntamenti.push(obj);
     DB.auditLog('create', 'appuntamento', obj.id, `Creato appuntamento del ${data}`);
     editAppuntamentoId = obj.id; // un eventuale secondo salvataggio in questa stessa apertura aggiorna, non duplica
@@ -9823,7 +10077,7 @@ function apriCaricaPdfIntervento(interventoId) {
   sel.value = _pdfInterventoFirmeDisponibili.length ? _pdfInterventoFirmeDisponibili[0].value : '';
 
   const dataScelta = _pdfInterventoFirmeDisponibili.length ? _pdfInterventoFirmeDisponibili[0].data : '';
-  document.getElementById('pdfInterventoDataInput').value = dataScelta ? new Date(dataScelta).toISOString().split('T')[0] : '';
+  document.getElementById('pdfInterventoDataInput').value = dataScelta ? dataLocaleDa(dataScelta) : '';
   document.getElementById('pdfInterventoNomeInput').value = i.firmaCliente || cliente?.referente || '';
 
   const fileInput = document.getElementById('pdfInterventoFileInput');
@@ -9848,7 +10102,7 @@ function _firmaPdfInterventoScelta() {
 async function _onCambioFirmaPdfIntervento() {
   const f = _firmaPdfInterventoScelta();
   if (f && f.data) {
-    document.getElementById('pdfInterventoDataInput').value = new Date(f.data).toISOString().split('T')[0];
+    document.getElementById('pdfInterventoDataInput').value = dataLocaleDa(f.data);
   }
   await _onCambioTimbroPdfIntervento();
 }
@@ -9919,7 +10173,11 @@ async function _renderPaginaPdfInterventoConTimbro(pdfDoc, numPagina, timbro) {
   await page.render({ canvasContext: ctx, viewport }).promise;
 
   const haQualcosaDaTimbrare = timbro && (timbro.dataUrl || timbro.nome || timbro.data);
-  if (numPagina === 2 && haQualcosaDaTimbrare) {
+  // Il timbro va in calce alla pagina 2; per i PDF di UNA sola pagina (scansioni brevi)
+  // si usa la pagina 1 — prima gli elementi finiti su una pagina inesistente sparivano
+  // dall'export senza alcun avviso.
+  const paginaTimbro = (pdfDoc.numPages >= 2) ? 2 : 1;
+  if (numPagina === paginaTimbro && haQualcosaDaTimbrare) {
     let img = null;
     if (timbro.dataUrl) {
       img = await new Promise((resolve) => {
@@ -9958,7 +10216,9 @@ async function _mostraAnteprimaPdfIntervento() {
   const info = document.getElementById('pdfInterventoPreviewInfo');
   if (info) {
     const haTimbro = timbro.dataUrl || timbro.nome || timbro.data;
-    const nota = haTimbro ? 'firma/nome/data selezionati applicati in calce alla pagina 2' : 'nessun timbro selezionato: la pagina non viene modificata';
+    const nota = haTimbro
+      ? (numPagine >= 2 ? 'firma/nome/data selezionati applicati in calce alla pagina 2' : 'PDF a pagina singola: firma/nome/data applicati in calce alla pagina 1')
+      : 'nessun timbro selezionato: la pagina non viene modificata';
     info.textContent = `${numPagine} pagin${numPagine === 1 ? 'a' : 'e'} — ${nota}`;
   }
 }
@@ -9988,9 +10248,14 @@ async function esportaPdfIntervento() {
     const orientamento = vp1.width > vp1.height ? 'landscape' : 'portrait';
     const newPdf = new jsPDF({ orientation: orientamento, unit: 'pt', format: [vp1.width, vp1.height] });
     for (let p = 1; p <= _pdfInterventoDoc.numPages; p++) {
-      if (p > 1) newPdf.addPage([vp1.width, vp1.height], orientamento);
+      // Ogni pagina mantiene le PROPRIE dimensioni/orientamento: prima formato e
+      // orientamento erano fissati sul viewport della pagina 1 e le pagine di scansioni
+      // con formati misti uscivano schiacciate/distorte nel file esportato.
+      const vp = p === 1 ? vp1 : (await _pdfInterventoDoc.getPage(p)).getViewport({ scale: 1 });
+      const ori = vp.width > vp.height ? 'landscape' : 'portrait';
+      if (p > 1) newPdf.addPage([vp.width, vp.height], ori);
       const canvas = await _renderPaginaPdfInterventoConTimbro(_pdfInterventoDoc, p, timbro);
-      newPdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, vp1.width, vp1.height, undefined, 'FAST');
+      newPdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, vp.width, vp.height, undefined, 'FAST');
     }
     const nomeFile = `Intervento_${intervento.numero || intervento.id}.pdf`;
     newPdf.save(nomeFile);
@@ -10133,21 +10398,26 @@ function renderInterventi() {
     const statoColori = {
       'Aperto':    { bg: '#3b82f6', text: '#ffffff' },
       'In corso':  { bg: '#f59e0b', text: '#ffffff' },
+      'In attesa ricambi': { bg: '#8b5cf6', text: '#ffffff' },
       'Chiuso':    { bg: '#10b981', text: '#ffffff' },
       'Annullato': { bg: '#ef4444', text: '#ffffff' }
     };
     const sc = statoColori[i.stato] || { bg: 'var(--surface2)', text: 'var(--text)' };
 
-    // Select per cambio stato diretto
+    // Select per cambio stato diretto: opzioni generate da DB.opzioni.stati (la stessa
+    // fonte del form), non hardcoded — prima "In attesa ricambi" mancava e l'intervento
+    // in quello stato mostrava la select VUOTA in tabella.
+    const statiDisp = (DB.opzioni && Array.isArray(DB.opzioni.stati) && DB.opzioni.stati.length)
+      ? DB.opzioni.stati : ['Aperto', 'In corso', 'Chiuso', 'Annullato'];
     const statoSelect = `
-      <select onchange="cambiaStatoIntervento(${i.id}, this.value)" 
+      <select onchange="cambiaStatoIntervento(${i.id}, this.value)"
               style="background:${sc.bg}; color:${sc.text}; border:none; border-radius:6px; padding:4px 8px; font-size:0.82rem; font-weight:600; cursor:pointer; min-width:100px; text-align:center;"
               onclick="event.stopPropagation();"
               title="Clicca per cambiare stato">
-        <option value="Aperto"    ${i.stato==='Aperto'?'selected':''}    style="background:#3b82f6;color:#fff">Aperto</option>
-        <option value="In corso"  ${i.stato==='In corso'?'selected':''}  style="background:#f59e0b;color:#fff">In corso</option>
-        <option value="Chiuso"    ${i.stato==='Chiuso'?'selected':''}    style="background:#10b981;color:#fff">Chiuso</option>
-        <option value="Annullato" ${i.stato==='Annullato'?'selected':''} style="background:#ef4444;color:#fff">Annullato</option>
+        ${statiDisp.map(v => {
+          const c = statoColori[v] || { bg: 'var(--surface2)', text: 'var(--text)' };
+          return `<option value="${escAttr(v)}" ${i.stato===v?'selected':''} style="background:${c.bg};color:${c.text}">${escHtml(v)}</option>`;
+        }).join('')}
       </select>`;
 
     return `<tr>
@@ -10459,7 +10729,7 @@ function _salvaRicambioImpl() {
     DB.ricambi[idx] = { ...DB.ricambi[idx], ...obj };
   } else {
     obj.id = DB.nextId('ricambio');
-    obj.createdAt = today();
+    obj.createdAt = new Date().toISOString();
     DB.ricambi.push(obj);
   }
   DB.save();
@@ -10822,7 +11092,13 @@ function eseguiRipristinoSelettivo() {
     if (imp.intestazione) localStorage.setItem('ivd_intestazione', imp.intestazione);
     if (imp.tema) localStorage.setItem('ivd_tema', imp.tema);
     if (imp.fontSize) localStorage.setItem('ivd_font_size', imp.fontSize);
-    if (d.merckPatterns) localStorage.setItem('merck_pdf_patterns', JSON.stringify(d.merckPatterns));
+    if (d.merckPatterns) {
+      localStorage.setItem('merck_pdf_patterns', JSON.stringify(d.merckPatterns));
+      // BUG FIX: i pattern venivano scritti su localStorage ma NON ricaricati in memoria
+      // (_merckTrainingData.patterns restava quello vecchio finché l'app non ripartiva):
+      // l'estrazione dai PDF Merck continuava a usare i pattern precedenti senza avviso.
+      if (typeof loadMerckPatterns === 'function') loadMerckPatterns();
+    }
     if (d.supabase) {
       if (d.supabase.username) localStorage.setItem('ivd_gh_username', d.supabase.username);
       if (d.supabase.url)      localStorage.setItem('ivd_supabase_url', d.supabase.url);
@@ -10833,11 +11109,18 @@ function eseguiRipristinoSelettivo() {
     _caricaImpostazioni();
   }
 
-  // Sincronizzazione contatori ID (per sicurezza prendiamo il max o i nuovi)
+  // Sincronizzazione contatori ID. Le chiavi di _nextId sono SINGOLARI (cliente,
+  // intervento, ...) mentre sel ha chiavi PLURALI (clienti, interventi, ...): prima il
+  // confronto sel[k] falliva sempre per le entità principali e i contatori di clienti,
+  // interventi, ricambi, fornitori e bolle non venivano MAI allineati — ripristinando un
+  // archivio più grande del locale, il nuovo record riceveva un id già esistente.
+  // Si prende SEMPRE il max (come fa syncDown): un contatore non torna mai indietro.
   if (d._nextId) {
+    const NEXTID_SEZIONE = { cliente: 'clienti', intervento: 'interventi', ricambio: 'ricambi', fornitore: 'fornitori', bolla: 'bolle', ordine: 'bolle', lotto: 'ricambi', appuntamento: 'appuntamenti' };
     Object.keys(d._nextId).forEach(k => {
-      if (sel[k] || (k==='lotto' && sel.ricambi) || (k==='ordine' && sel.bolle) || (k==='appuntamento' && sel.appuntamenti)) {
-        DB._nextId[k] = d._nextId[k];
+      const sezione = NEXTID_SEZIONE[k];
+      if (sezione && sel[sezione]) {
+        DB._nextId[k] = Math.max(DB._nextId[k] || 0, d._nextId[k] || 0);
       }
     });
   }
@@ -10932,12 +11215,16 @@ async function _scriviAutoBackup(forzato = false) {
     const perm = await _autoBackupDirHandle.queryPermission({ mode: 'readwrite' });
     if (perm !== 'granted') { _autoBackupDirHandle = null; _autoBackupScrittura = false; return; }
 
+    // BUG FIX: il payload NON includeva `appuntamenti` (a differenza del backup manuale
+    // eseguiBackup). Il file veniva però accettato dal restore: ripristinare da un backup
+    // automatico azzerava TUTTI gli appuntamenti in silenzio.
     const payload = {
       version: '2.0', app: 'IVD Assistenza Tecnica',
       date: new Date().toISOString(),
       data: { clienti: DB.clienti, interventi: DB.interventi, ricambi: DB.ricambi,
                fornitori: DB.fornitori, bolle: DB.bolle, ordini: DB.ordini,
-               inventari: DB.inventari, _nextId: DB._nextId, opzioni: DB.opzioni }
+               inventari: DB.inventari, appuntamenti: DB.appuntamenti || [],
+               _nextId: DB._nextId, opzioni: DB.opzioni }
     };
 
     // Rotazione: mantiene le ultime 5 versioni, scrivendo direttamente nella cartella già
@@ -11677,10 +11964,13 @@ function _salvaFornitoreImpl() {
   };
   if (editFornitoreId) {
     const idx = DB.fornitori.findIndex(x => x.id === editFornitoreId);
+    // Guard: record eliminato nel frattempo (sync/seconda finestra) — prima la modifica
+    // finiva sull'indice -1 e veniva perduta in silenzio.
+    if (idx === -1) { mostraToast('⚠️ Il fornitore non esiste più in archivio: modifica non salvata.', 'warning'); return; }
     DB.fornitori[idx] = { ...DB.fornitori[idx], ...obj };
   } else {
     obj.id = DB.nextId('fornitore');
-    obj.createdAt = today();
+    obj.createdAt = new Date().toISOString();
     DB.fornitori.push(obj);
   }
   DB.save();
@@ -12189,7 +12479,7 @@ function importaRecordCliente(data) {
       id: DB.nextId('cliente'),
       ...obj,
       strumentiInstallati: [],
-      createdAt: today()
+      createdAt: new Date().toISOString()
     };
     DB.clienti.push(c);
   } else {
@@ -12238,12 +12528,16 @@ function importaRecordRicambio(data) {
       id: DB.nextId('ricambio'),
       codice: codice,
       descrizione: data.descrizione || '',
-      qta: qtaExcel, 
+      qta: qtaExcel,
       um: data.um || 'pz',
       prezzo: parseFloat(String(data.prezzo || '0').replace(',','.')) || 0,
       fornitore: data.fornitore || '',
-      lotti: [],
-      createdAt: today()
+      // BUG FIX: prima veniva impostato sempre `lotti: []`, anche quando l'Excel non aveva
+      // lotti. Un array vuoto significa "gestione a lotti attiva" per syncRicambioQta
+      // (qta = somma dei lotti = 0): alla prima movimentazione la giacenza importata
+      // veniva azzerata. Senza lotto il ricambio deve restare a sola quantità; il ramo
+      // lotto qui sotto crea l'array al bisogno.
+      createdAt: new Date().toISOString()
     };
     DB.ricambi.push(r);
   } else {
@@ -12288,6 +12582,29 @@ function importaRecordRicambio(data) {
   }
 }
 
+// Cerca il cliente proprietario di un seriale (usata dall'import Excel e dal PDF Merck).
+// Il matching "per sottostringa" serve per seriali troncati nel file, ma il PRIMO match
+// (find) poteva attribuire il cliente SBAGLIATO quando un seriale archiviato è prefisso
+// di un altro ("ABC1" matchava prima del "ABC12" del cliente giusto): si preferisce sempre
+// il match ESATTO e, a parità, il seriale archiviato più lungo (più specifico).
+// Con seriale vuoto/assente restituisce sempre null (prima, String('').includes, matchava
+// il primo cliente con un qualunque seriale).
+function trovaClienteDaSeriale(seriale) {
+  const sExt = String(seriale || '').trim().toLowerCase();
+  if (!sExt) return { cliente: null, strumento: null };
+  let migliore = null;
+  let matchEsatto = null;
+  (DB.clienti || []).forEach(c => (c.strumentiInstallati || []).forEach(s => {
+    const sNum = String(s.seriale || '').trim().toLowerCase();
+    if (!sNum) return;
+    if (sNum === sExt) { if (!matchEsatto) matchEsatto = { cliente: c, strumento: s }; return; }
+    if (sNum.includes(sExt) || sExt.includes(sNum)) {
+      if (!migliore || sNum.length > migliore.len) migliore = { cliente: c, strumento: s, len: sNum.length };
+    }
+  }));
+  return matchEsatto || migliore || { cliente: null, strumento: null };
+}
+
 function importaRecordIntervento(data) {
   if (!data.data) return;
   
@@ -12298,13 +12615,9 @@ function importaRecordIntervento(data) {
   let strumentoTrovato = null;
   
   if (serialeExcel) {
-    clienteTrovato = DB.clienti.find(c => (c.strumentiInstallati || []).some(s => {
-      const sNum = String(s.seriale || '').trim().toLowerCase();
-      const sExt = serialeExcel.toLowerCase();
-      const match = sNum && (sNum === sExt || sExt.includes(sNum) || sNum.includes(sExt));
-      if (match) strumentoTrovato = s;
-      return match;
-    }));
+    const trovato = trovaClienteDaSeriale(serialeExcel);
+    clienteTrovato = trovato.cliente;
+    strumentoTrovato = trovato.strumento;
   }
   
   // 2. Fallback: cerca per ragione sociale se non trovato tramite seriale
@@ -12320,9 +12633,21 @@ function importaRecordIntervento(data) {
     if (f) fId = f.id;
   }
   
+  // BUG FIX (numero off-by-one): l'id viene generato PRIMA della proprietà numero, quindi
+  // il numero di riserva leggeva il contatore GIÀ incrementato: l'ultima riga importata
+  // senza numero e il primo intervento creato a mano ricevevano lo STESSO WO. Ora il
+  // numero di riserva usa l'id appena assegnato, e si evita comunque un numero già in uso.
+  const nuovoIdImport = DB.nextId('intervento');
+  let numeroImport = String(data.numero || '').trim() || ('WO-' + String(nuovoIdImport).padStart(4, '0'));
+  if (DB.interventi.some(x => x.numero === numeroImport && x.id !== nuovoIdImport)) {
+    numeroImport = 'WO-' + String(nuovoIdImport).padStart(4, '0') + '-IMP';
+    let suff = 2;
+    while (DB.interventi.some(x => x.numero === numeroImport)) numeroImport = 'WO-' + String(nuovoIdImport).padStart(4, '0') + '-IMP' + suff++;
+  }
+
   const nuovo = {
-    id: DB.nextId('intervento'), 
-    numero: data.numero || ('WO-' + String(DB._nextId.intervento).padStart(4,'0')),
+    id: nuovoIdImport,
+    numero: numeroImport,
     data: convertiDataExcel(data.data),
     clienteId: clienteTrovato ? clienteTrovato.id : null,
     strumento: strumentoTrovato ? strumentoTrovato.modello : (data.strumento || ''),
@@ -12341,7 +12666,7 @@ function importaRecordIntervento(data) {
     firmaCliente: clienteTrovato ? (clienteTrovato.referente || '') : '',
     fornitoreId: fId,
     stato: 'Aperto',
-    createdAt: today()
+    createdAt: new Date().toISOString()
   };
 
   // Forza ricalcolo importo se abbiamo il fornitore — usa la formula condivisa
@@ -12374,10 +12699,24 @@ function convertiDataExcel(val) {
     const gg = parseInt(mEu[1], 10), mm = parseInt(mEu[2], 10), aaaa = parseInt(mEu[3], 10);
     if (mm >= 1 && mm <= 12 && gg >= 1 && gg <= 31) {
       const dEu = new Date(Date.UTC(aaaa, mm - 1, gg));
-      if (!isNaN(dEu.getTime())) return dEu.toISOString().split('T')[0];
+      // Validazione round-trip: "31/02/2024" veniva normalizzato in silenzio dal
+      // costruttore a 02/03 — meglio rigettarlo e lasciarlo al fallback (con trace).
+      if (!isNaN(dEu.getTime()) && dEu.getUTCDate() === gg && dEu.getUTCMonth() === mm - 1) {
+        return dEu.toISOString().split('T')[0];
+      }
     }
   }
-  // Altrimenti tenta il parse standard (es. formato ISO AAAA-MM-GG)
+  // Formati "AAAA-MM-GG" / "AAAA/MM/GG": composizione esplicita dei componenti, senza
+  // passare da Date (che con i separatori "/" parsa in ora locale e poi la conversione
+  // UTC toglieva un giorno in fusi avanti).
+  const mIso = str.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+  if (mIso) {
+    const aaaa = parseInt(mIso[1], 10), mm = parseInt(mIso[2], 10), gg = parseInt(mIso[3], 10);
+    if (mm >= 1 && mm <= 12 && gg >= 1 && gg <= 31) return `${aaaa}-${String(mm).padStart(2,'0')}-${String(gg).padStart(2,'0')}`;
+  }
+  // Altrimenti tenta il parse standard (es. "Mar 15, 2024"), MA componendo il risultato
+  // dai componenti LOCALI: prima si riconvertiva con toISOString() e ogni data parsata a
+  // mezzanotte locale (fusi avanti su UTC) risultava indietro di un giorno.
   const d = new Date(str);
   if (isNaN(d.getTime())) {
     // BUG FIX: prima si tornava silenziosamente "oggi" senza traccia — un formato non
@@ -12386,7 +12725,7 @@ function convertiDataExcel(val) {
     console.warn(`convertiDataExcel: data non riconosciuta "${val}", impostata a oggi.`);
     return today();
   }
-  return d.toISOString().split('T')[0];
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
 function salvaSupabaseConfig() {
@@ -12675,6 +13014,40 @@ function _salvaBollaImpl() {
   if (!dVal) { mostraToast('Inserisci la data'); return; }
   if ((_currentBollaTipo === 'carico' || isDDT) && !nVal) { mostraToast(isDDT ? 'Inserisci il numero di D.D.T.' : 'Inserisci il numero di bolla'); return; }
 
+  // BUG FIX (ordine validazioni/mutazioni): l'"UNDO" dei movimenti vecchi (invertiMovimentiBolla)
+  // girava PRIMA della raccolta delle righe e delle relative validazioni: un'uscita
+  // anticipata (es. nessun articolo valido, o ricambi eliminati) lasciava il magazzino
+  // in memoria già ripristinato con la bolla ancora salvata — il PROSSIMO salvataggio
+  // qualunque rendeva persistente lo stato corrotto (lotti spariti o scarichi non
+  // riflessi). Tutte le validazioni ora girano PRIMA di toccare il magazzino.
+  const _righeValide = () => {
+    const container = document.getElementById('bollaItemsContainer');
+    const allRows = container ? container.querySelectorAll('.parts-item') : [];
+    return [...allRows].filter(row => {
+      const ridEl = row.querySelector('.item-id');
+      const qtaEl = row.querySelector('.item-qta');
+      if (!ridEl || !qtaEl) return false;
+      const rid = parseInt(ridEl.value);
+      const qta = parseFloat(qtaEl.value) || 0;
+      if (!rid || qta <= 0) return false;
+      return DB.ricambi.some(x => x.id === rid);
+    });
+  };
+  if (_righeValide().length === 0) { mostraToast('Aggiungi almeno un articolo valido'); return; }
+
+  // Unicità del numero bolla/DDT (per il D.D.T. la numerazione progressiva annuale è di
+  // obbligo — DPR 472/96): prima due bolle/DDT potevano condividere lo stesso numero, e
+  // gli annullamenti (che risalgono alla bolla dalla nota "Carico da Ordine <numero>")
+  // potevano toccare la bolla sbagliata.
+  const numeroDaSalvare = (nVal || '').trim();
+  if (numeroDaSalvare) {
+    const duplicatoBolla = DB.bolle.find(x => x.id !== _currentBollaId && String(x.numero || '').trim() === numeroDaSalvare);
+    if (duplicatoBolla) {
+      mostraToast(`Il numero "${numeroDaSalvare}" è già usato da un'altra bolla/D.D.T. (del ${fmtDate(duplicatoBolla.data) || '—'}).\nInserisci un numero univoco.`, 'danger');
+      return;
+    }
+  }
+
   // Campi obbligatori a norma di legge per un Documento Di Trasporto (DPR 472/1996):
   // destinatario e causale del trasporto. Raccolti qui prima di toccare il magazzino, così
   // un dato mancante interrompe il salvataggio senza aver già scaricato nulla.
@@ -12764,6 +13137,7 @@ function _salvaBollaImpl() {
       const lottoId = lottoSel ? parseInt(lottoSel.value) : null;
       let daScaricare = qta;
       const lottiUsati = [];
+      let qtaDiretta = 0; // quantità decurtata direttamente da r.qta (ricambi senza lotti)
 
       if (lottoId) {
         const l = r.lotti.find(x => x.id === lottoId);
@@ -12773,8 +13147,8 @@ function _salvaBollaImpl() {
           if (t > 0) lottiUsati.push({ lottoId: l.id, qta: t });
           daScaricare -= t;
         }
-      } else {
-        const sorted = (r.lotti||[]).filter(l=>l.qta>0).sort((a,b)=>(a.scadenza||'9999').localeCompare(b.scadenza||'9999'));
+      } else if (Array.isArray(r.lotti) && r.lotti.length > 0) {
+        const sorted = r.lotti.filter(l=>l.qta>0).sort((a,b)=>(a.scadenza||'9999').localeCompare(b.scadenza||'9999'));
         for (const l of sorted) {
           if (daScaricare <= 0) break;
           const t = Math.min(l.qta, daScaricare);
@@ -12782,9 +13156,20 @@ function _salvaBollaImpl() {
           daScaricare -= t;
           if (t > 0) lottiUsati.push({ lottoId: l.id, qta: t });
         }
+      } else {
+        // BUG FIX: fallback per ricambi a SOLA QUANTITÀ (senza lotti), allineato al flusso
+        // "Movimenta". Prima lo scarico bolla non toccava proprio la giacenza (con warning
+        // "scorta insufficiente" sempre presente), mentre l'annullamento della bolla la
+        // ricaricava per intero: stock gonfiato. Si traccia quanto realmente decurtato
+        // (qtaDiretta) così l'annullamento ripristina esattamente quello tolto.
+        const prima = Math.max(0, parseFloat(r.qta) || 0);
+        const presa = Math.min(prima, daScaricare);
+        r.qta = Math.round((prima - presa) * 100) / 100;
+        qtaDiretta = Math.round(presa * 100) / 100;
+        daScaricare = Math.round((daScaricare - presa) * 100) / 100;
       }
       DB.syncRicambioQta(r.id);
-      articoli.push({ ricambioId: rid, codice: r.codice, desc: r.descrizione, qta, lottoId, lottiUsati });
+      articoli.push({ ricambioId: rid, codice: r.codice, desc: r.descrizione, qta, lottoId, lottiUsati, qtaDiretta });
       if (daScaricare > 0.001) {
         scorteInsufficienti.push(`${r.codice} — richiesti ${qta}, mancanti ${Math.round(daScaricare*100)/100} ${r.um||'pz'}`);
       }
@@ -12807,8 +13192,11 @@ function _salvaBollaImpl() {
     const bolla = {
       id: bId,
       tipo: _currentBollaTipo,
-      numero: nVal || ('BOL-S-' + Date.now().toString().slice(-6)),
-      data: dVal, note: noteVal, articoli, fornitoreId: fVal, createdAt: today(),
+      // Numero di riserva univoco basato sull'id della bolla (prima si usavano le ultime
+      // 6 cifre del timestamp in ms: due scarichi a ~16 minuti di distanza potevano avere
+      // lo stesso numero, rompendo l'annullamento per numero).
+      numero: nVal || ('BOL-S-' + bId),
+      data: dVal, note: noteVal, articoli, fornitoreId: fVal, createdAt: new Date().toISOString(),
       ...(datiDDT || {})
     };
     DB.bolle.unshift(bolla);
@@ -12982,8 +13370,14 @@ function invertiMovimentiBolla(id) {
       r.lotti = (r.lotti||[]).filter(l => l.bollaId !== id);
       r.qta = (r.lotti||[]).reduce((acc,curr) => acc + Math.max(0, parseFloat(curr.qta) || 0), 0);
     } else {
-      if (art.lottiUsati && art.lottiUsati.length > 0) {
-        // Ripristina la quantità esatta sui lotti da cui era stata scaricata (FIFO o selezione manuale)
+      if (art.qtaDiretta) {
+        // Scarico su ricambio a sola quantità: ripristina esattamente quanto decurtato.
+        r.qta = Math.round(((r.qta || 0) + art.qtaDiretta) * 100) / 100;
+      } else if (Array.isArray(art.lottiUsati)) {
+        // Bolla con tracciamento per-lotto: ripristina la quantità esatta sui lotti da cui
+        // era stata scaricata (FIFO o selezione manuale). Se l'array è vuoto non era stato
+        // scaricato nulla (scorta insufficiente): nessun ripristino — prima il fallback
+        // sotto riaggiungeva art.qta INTERA che non era mai stata tolta, gonfiando il magazzino.
         art.lottiUsati.forEach(lu => {
           const l = (r.lotti||[]).find(x => x.id === lu.lottoId);
           if (l) {
@@ -13239,7 +13633,7 @@ function _salvaOrdineImpl() {
       tipo: 'ordine',
       numero, data, fornitoreId, note, articoli,
       stato: 'In attesa',
-      createdAt: today()
+      createdAt: new Date().toISOString()
     };
     DB.ordini.unshift(ordine);
   }
@@ -13900,13 +14294,38 @@ function caricaLogo(event) {
   if (file.size > 512 * 1024) { mostraToast('Il file supera i 500 KB. Usa un\'immagine più piccola.'); return; }
   const reader = new FileReader();
   reader.onload = e => {
-    const dataUrl = e.target.result;
-    localStorage.setItem('ivd_logo', dataUrl);
-    const area = document.getElementById('logoPreviewContent');
-    if (area) area.innerHTML = `<img src="${dataUrl}" alt="logo">`;
-    const btn = document.getElementById('btnRimuoviLogo');
-    if (btn) btn.style.display = '';
-    aggiornaAnteprimaIntestazione();
+    // Salva + aggiorna l'anteprima
+    const salva = (dataUrl) => {
+      localStorage.setItem('ivd_logo', dataUrl);
+      const area = document.getElementById('logoPreviewContent');
+      if (area) area.innerHTML = `<img src="${dataUrl}" alt="logo">`;
+      const btn = document.getElementById('btnRimuoviLogo');
+      if (btn) btn.style.display = '';
+      aggiornaAnteprimaIntestazione();
+    };
+    let dataUrl = e.target.result;
+    // BUG FIX: un SVG veniva accettato e mostrato a video, ma jsPDF non lo supporta in
+    // addImage: ogni Rapporto PDF usciva senza logo, con l'errore inghiottito da un
+    // catch vuoto. Rasterizziamo subito l'SVG in PNG (canvas) alla scelta del file.
+    if (file.type === 'image/svg+xml' || dataUrl.startsWith('data:image/svg')) {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const c = document.createElement('canvas');
+          c.width = Math.max(1, img.naturalWidth || img.width || 300);
+          c.height = Math.max(1, img.naturalHeight || img.height || 100);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          dataUrl = c.toDataURL('image/png');
+          salva(dataUrl);
+        } catch (err) {
+          mostraToast('Logo SVG non rasterizzabile: usa PNG o JPG.', 'warning');
+        }
+      };
+      img.onerror = () => mostraToast('Logo SVG non valido: usa PNG o JPG.', 'warning');
+      img.src = dataUrl;
+      return;
+    }
+    salva(dataUrl);
   };
   reader.readAsDataURL(file);
 }
@@ -14099,10 +14518,10 @@ function anteprimaPDFInterventi() {
     tecnicoFiltro ? `Tecnico: ${tecnicoFiltro}` : '',
     clienteFiltro ? `Cliente: ${clienteFiltro}` : '',
     `Totale: ${list.length} interventi`,
-  ].filter(Boolean).join(' &nbsp;·&nbsp; ');
+  ].filter(Boolean).join(' · ');
 
   _apriPDF('Registro Interventi', filtriDesc, intestazioni, righe,
-    `Stampato il ${new Date().toLocaleDateString('it-IT')} &nbsp;·&nbsp; IVD Assistenza Tecnica`);
+    `Stampato il ${new Date().toLocaleDateString('it-IT')} · IVD Assistenza Tecnica`);
 }
 
 function anteprimaPDFSezione(sezione) {
@@ -14161,7 +14580,10 @@ function _valPeriodo() {
     if (!ms) return { dal: null, al: null };
     const [y, m] = ms.split('-').map(Number);
     const dal = `${y}-${String(m).padStart(2,'0')}-01`;
-    const al  = new Date(y, m, 0).toISOString().split('T')[0];
+    // BUG FIX UTC: new Date(y, m, 0).toISOString() restituiva il PENULTIMO giorno del
+    // mese in fusi avanti su UTC — tutta l'attività dell'ultimo giorno restava fuori
+    // dalla valorizzazione. Si costruisce la data in orario locale.
+    const al  = fineMeseLocale(y, m - 1);
     return { dal, al };
   } else {
     return {
@@ -14379,8 +14801,11 @@ function getInterventiPeriodo() {
   const now = new Date();
   let dal, al;
   if (val === 'mese') {
-    dal = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-    al  = new Date(now.getFullYear(), now.getMonth()+1, 0).toISOString().split('T')[0];
+    // BUG FIX UTC (stesso di today()/valorizzazione): le mezzanotti locali convertite con
+    // toISOString() spostavano "dal" all'ultimo giorno del mese PRECEDENTE e "al" al
+    // penultimo del mese corrente — l'export Ore/Km includeva/escludeva i giorni sbagliati.
+    dal = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`;
+    al  = fineMeseLocale(now.getFullYear(), now.getMonth());
   } else if (val === 'anno') {
     dal = `${now.getFullYear()}-01-01`;
     al  = `${now.getFullYear()}-12-31`;
@@ -14426,6 +14851,9 @@ function aggiornaPrevExport() {
 }
 
 function eseguiExportInterventi() {
+  // Unico export Excel senza gestione errori: se la libreria SheetJS non si è caricata
+  // (CDN non raggiungibile) l'eccezione era muta e il modal restava aperto senza feedback.
+  try {
   const list = filtraInterventiExport();
   if (list.length === 0) { mostraToast('Nessun intervento nel periodo selezionato.'); return; }
 
@@ -14508,6 +14936,10 @@ function eseguiExportInterventi() {
   const { dal: d1, al: d2 } = getInterventiPeriodo();
   XLSX.writeFile(wb, `IVD_Interventi_${d1}_${d2}.xlsx`);
   closeModal('modalExportInterventi');
+  } catch (e) {
+    console.error('Errore export interventi:', e);
+    mostraToast('❌ Errore durante l\'export: ' + (e.message || e) + ' — verifica la connessione (libreria Excel da CDN).', 'danger');
+  }
 }
 
 // ======================== EXCEL EXPORT / IMPORT ========================
@@ -15140,7 +15572,7 @@ function loadDemoData() {
     { id:4, ragione:'Siemens Healthineers Italia', categoria:'OEM / Produttore', codice:'FOR-004', contatto:'Federica Neri', tel:'02 24362950', email:'techsupport.it@siemens-healthineers.com', sito:'www.siemens-healthineers.com', piva:'IT07982120967', indirizzo:'Viale Piero e Alberto Pirelli 10', citta:'Milano', cap:'20126', prov:'MI', lead:14, prodotti:'Immulite, Atellica, Advia', note:'', createdAt:'2025-01-01' },
   ];
   const _oggiDemo = new Date();
-  const _dataFutura = (giorni) => { const d = new Date(_oggiDemo); d.setDate(d.getDate() + giorni); return d.toISOString().split('T')[0]; };
+  const _dataFutura = (giorni) => { const d = new Date(_oggiDemo); d.setDate(d.getDate() + giorni); return dataLocaleDa(d); };
   DB.appuntamenti = [
     { id:1, clienteId:1, data:_dataFutura(3), oraInizio:'09:00', oraFine:'11:00', stato:'Programmato', strumento:'Cobas 6000', seriale:'SN-C6000-1856', problema:'Rumore anomalo durante il ciclo di lavaggio', tecnico:'Anna Colombo', note:'Verificare anche il livello reagenti', createdAt:today() },
     { id:2, clienteId:2, data:_dataFutura(7), oraInizio:'14:00', oraFine:'', stato:'Confermato', strumento:'Immulite 2000 XPI', seriale:'', problema:'Manutenzione preventiva semestrale', tecnico:'Mario Verdi', note:'', createdAt:today() },
@@ -15693,12 +16125,12 @@ async function createInterventoFromMerck() {
   const serialeEstratto = (data.matricola||'').trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
   let oreLavoroEstratte = 0, oreViaggioEstratte = 0;
 
-  // Cerca cliente nel DB locale tramite seriale
-  const clienteTrovato = DB.clienti.find(c => (c.strumentiInstallati||[]).some(s => {
-    const sNum = String(s.seriale||'').trim().toLowerCase();
-    const sExt = String(serialeEstratto).toLowerCase();
-    return sNum && (sNum === sExt || sExt.includes(sNum) || sNum.includes(sExt));
-  }));
+  // Cerca cliente nel DB locale tramite seriale — solo se il seriale è stato davvero
+  // estratto: prima, con estrazione fallita (stringa vuota), il match per sottostringa
+  // riusciva comunque sul primo cliente con un qualunque seriale, precompilando l'intero
+  // intervento con il cliente SBAGLIATO.
+  const trovato = trovaClienteDaSeriale(serialeEstratto);
+  const clienteTrovato = trovato.cliente;
 
   // Il PDF Merck viene usato solo per estrarre i dati: non viene più letto/allegato
   // all'intervento (troppo pesante da conservare nell'archivio).
@@ -15733,7 +16165,9 @@ async function createInterventoFromMerck() {
   // Popola campi
   const scriviOre = () => { if(oreLavoroEstratte>0) setV('i_ore_lavoro', oreLavoroEstratte); if(oreViaggioEstratte>0) setV('i_ore_viaggio', oreViaggioEstratte); };
   
-  setV('i_numero', data.wo);
+  // Solo se l'estrazione ha prodotto un WO: prima il campo veniva svuotato anche con
+  // estrazione fallita, cancellando il numero progressivo precompilato.
+  if (data.wo) setV('i_numero', data.wo);
   setV('i_data', convertMerckDate(data.data));
   setV('i_seriale', serialeEstratto);
   setV('i_problema', data.problema);
