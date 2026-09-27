@@ -3656,7 +3656,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.6 • 25 set 2026';
+const APP_VERSION = '2.10.7 • 27 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -14865,7 +14865,7 @@ function eseguiExportInterventi() {
     const cl = DB.clienti.find(c => c.id === i.clienteId);
     const row = { 'N° Intervento': i.numero };
     if (col('expColData'))       row['Data']           = fmtDate(i.data);
-    if (col('expColCliente'))    row['Cliente']         = cl ? cl.ragione : '';
+    if (col('expColCliente'))    { row['Cliente'] = cl ? cl.ragione : ''; row['Città'] = cl ? cl.citta : ''; row['Indirizzo'] = cl ? cl.indirizzo : ''; }
     if (col('expColStrumento'))  row['Strumento']       = i.strumento;
     if (col('expColTipo'))       row['Tipo']            = i.tipo;
     if (col('expColTecnico'))    row['Tecnico']         = i.tecnico + (i.tecnico2 ? ' + '+i.tecnico2 : '');
@@ -14992,6 +14992,7 @@ function exportExcel(tipo) {
       const cl = DB.clienti.find(c => c.id === i.clienteId);
       return {
         'N° Intervento': i.numero, 'Data': fmtDate(i.data), 'Cliente': cl ? cl.ragione : '',
+        'Città': cl ? cl.citta : '', 'Indirizzo': cl ? cl.indirizzo : '',
         'Strumento': i.strumento, 'Matricola/SN': i.seriale, 'Tipo': i.tipo,
         'Tecnico': i.tecnico, 'Tecnico 2': i.tecnico2, 'Stato': i.stato,
         'Priorità': i.priorita, 'Esito': i.esito,
