@@ -3310,15 +3310,16 @@
           <div class="backup-info" id="backupLastInfo">Nessun backup manuale effettuato in questa sessione.</div>
         </div>
 
-        <!-- AUTO BACKUP -->
+        <!-- ARCHIVIO LOCALE SU CARTELLA -->
         <div class="backup-card">
-          <h4>🔄 Backup automatico su file</h4>
-          <p>Una cartella viene aggiornata automaticamente ad ogni modifica, mantenendo le ultime 5 versioni a rotazione. È sufficiente impostarla una sola volta.</p>
-          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-            <button class="btn btn-primary" onclick="scegliPosizioneAutoBackup()">📁 Imposta cartella</button>
-            <button class="btn btn-ghost" onclick="_scriviAutoBackup(true).then(()=>{ if(_autoBackupDirHandle) mostraToast('✅ Backup automatico aggiornato: ' + _autoBackupDirHandle.name, 'success'); else mostraToast('Cartella non impostata. Clicca prima su Imposta cartella.'); })">💾 Salva ora</button>
+          <h4>🗂️ Archivio locale</h4>
+          <p>L'archivio vive in una cartella del tuo computer, in file JSON leggibili, con snapshot di backup automatici a rotazione nella sottocartella <code>backups/</code>. Copiare l'intera cartella equivale a un backup completo.</p>
+          <div id="archivioInfo" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px;">Rilevamento cartella…</div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <button class="btn btn-primary" onclick="apriCartellaArchivio()">📂 Apri cartella</button>
+            <button class="btn btn-ghost" onclick="spostaArchivioArchivio()">📦 Sposta archivio…</button>
+            <button class="btn btn-ghost" onclick="_scriviAutoBackup('manuale'); setTimeout(aggiornaInfoArchivio, 500);">💾 Backup ora</button>
           </div>
-          <div id="autoBackupInfo" style="margin-top:8px;font-size:0.83rem;color:var(--text-muted);">Nessuna posizione impostata.</div>
         </div>
 
         <!-- EXPORT TUTTO -->
@@ -3736,8 +3737,13 @@ const _OPZIONI_DEFAULT = {
 
 // ======================== DATA STORE ======================
 
-// 1. Inizializzazione Dexie (Schema Database)
-// Protetto: se il CDN non carica, l'app funziona con localStorage solo
+// 1. Inizializzazione Dexie (IndexedDB)
+// RUOLO ATTUALE: SOLO sorgente di lettura per la migrazione one-time verso la cartella
+// archivio (_caricaArchivioLocale, caso "cartella vuota"). L'archivio primario è la
+// cartella (dati/ con JSON per tabella, via IPC): IndexedDB NON viene più scritto, così
+// non possono esistere due archivi locali divergenti. Non rimuovere il blocco: gli utenti
+// che hanno i dati nella vecchia IndexedDB li recuperano solo da qui (la cache localStorage
+// è "leggera" e non contiene firme/PDF).
 let dexieDB = null;
 try {
   if (typeof Dexie !== 'undefined') {
@@ -3801,9 +3807,9 @@ const DB = {
     opzioni: {},
     _nextId: { cliente: 1, intervento: 1, ricambio: 1, lotto: 1, fornitore: 1, bolla: 1, ordine: 1, inventario: 1, appuntamento: 1 },
 
-    // GUARDIA ANTI-PERDITA DATI: resta false finché _loadFromDexie() non ha terminato di
-    // leggere la sorgente primaria (IndexedDB) in memoria. Finché è false NESSUNA scrittura
-    // distruttiva verso IndexedDB/backup è permessa: la memoria potrebbe ancora essere la
+    // GUARDIA ANTI-PERDITA DATI: resta false finché _caricaArchivioLocale() non ha terminato di
+    // leggere la sorgente primaria (cartella archivio) in memoria. Finché è false NESSUNA scrittura
+    // distruttiva verso cartella/backup è permessa: la memoria potrebbe ancora essere la
     // cache "leggera" di localStorage (senza PDF/firme) o addirittura vuota, e sovrascriverci
     // sopra il DB reale ne causerebbe la distruzione permanente (bug "dati persi all'avvio").
     _loaded: false,
@@ -3855,100 +3861,119 @@ const DB = {
         // 2. Versione e migrazione
         this._checkVersion();
 
-        // 3. Caricamento asincrono da IndexedDB (sorgente primaria)
-        this._loadFromDexie().catch(e => console.warn("Errore load Dexie:", e));
+        // 3. Caricamento asincrono dell'archivio locale su CARTELLA (sorgente primaria).
+        // La promise resta esposta come _loadPromise: SUPABASE.init() la attende prima di
+        // fare syncDown (che sostituisce le tabelle e riscrive l'archivio) — avviare il
+        // download durante il caricamento poteva far perdere i dati appena scaricati.
+        this._loadPromise = this._caricaArchivioLocale().catch(e => console.warn("Errore caricamento archivio:", e));
     },
 
-    // Carica da IndexedDB (sorgente primaria). Se Dexie è vuoto, migra i dati localStorage
-    async _loadFromDexie() {
-        if (!dexieDB) {
-            // Nessun IndexedDB disponibile (CDN Dexie non caricata): la memoria contiene già
-            // i dati di localStorage. Segnaliamo comunque il caricamento come completato così
-            // i salvataggi (solo su localStorage) e l'eventuale demo possono procedere.
-            this._loaded = true;
-            this._afterLoad();
-            return;
-        }
+    // Carica l'archivio dalla cartella locale (~/Documents/Assistenza Tecnica IVD o
+    // percorso scelto dall'utente, vedi preload.js/main.js — file JSON per tabella, letti via IPC).
+    // Ordine di risoluzione:
+    //  1. la cartella contiene file → QUELLI sono l'archivio (sorgente primaria);
+    //  2. la cartella è vuota → migrazione one-time: dati COMPLETI (incluse firme/PDF,
+    //     che la cache localStorage non ha) letti da Dexie/IndexedDB se presenti;
+    //  3. nemmeno IndexedDB ha dati → resta la cache leggera di localStorage in memoria.
+    async _caricaArchivioLocale() {
+        let daCartella = null;
         try {
-            // "Dexie vuoto" = NESSUNA delle 8 tabelle contiene record. Prima si contava solo
-            // clienti: con 0 clienti ma ricambi/bolle/ordini presenti (e cache localStorage
-            // persa o mai scritta), il ramo di migrazione eseguiva clear()+bulkPut con la
-            // memoria (vuota o parziale), cancellando permanentemente gli archivi non-clienti.
-            const conteggi = await Promise.all([
-                dexieDB.clienti.count(), dexieDB.interventi.count(), dexieDB.ricambi.count(),
-                dexieDB.fornitori.count(), dexieDB.bolle.count(), dexieDB.ordini.count(),
-                dexieDB.inventari.count(), dexieDB.appuntamenti.count()
-            ]);
-            const count = conteggi.reduce((a, b) => a + b, 0);
-            if (count > 0) {
-                console.log("🔄 Caricamento dati completi da IndexedDB (Dexie)...");
-                const [cli, inte, ric, forn, bol, ord, inv, app] = await Promise.all([
-                    dexieDB.clienti.toArray(),
-                    dexieDB.interventi.toArray(),
-                    dexieDB.ricambi.toArray(),
-                    dexieDB.fornitori.toArray(),
-                    dexieDB.bolle.toArray(),
-                    dexieDB.ordini.toArray(),
-                    dexieDB.inventari.toArray(),
-                    dexieDB.appuntamenti.toArray()
-                ]);
+            if (window.ivdFS) daCartella = await window.ivdFS.leggiTutto();
+        } catch (e) { console.warn("⚠️ Lettura cartella archivio fallita:", e); }
 
-                this.clienti = cli;
-                this.interventi = inte;
-                this.ricambi = ric;
-                this.fornitori = forn;
-                this.bolle = bol;
-                this.ordini = ord;
-                this.inventari = inv;
-                this.appuntamenti = app;
+        const files = (daCartella && daCartella.files) || {};
+        const haArchivioCartella = Object.keys(files).length > 0;
 
-                // _checkVersion() in load() aveva già migrato e marcato come "fatta" la
-                // migrazione, ma su una copia temporanea (i dati letti da localStorage prima
-                // che Dexie fosse pronto) — copia che viene scartata proprio qui sopra. I dati
-                // reali di IndexedDB non passavano mai dalla migrazione. _migrate() è
-                // idempotente (controlla solo la presenza dei campi), quindi è sicuro
-                // rieseguirla ora sui dati effettivamente in uso.
-                this._migrate(0);
-
-                // Aggiorna cache localStorage dopo carica Dexie
-                this._cacheToLocalStorage();
-
-                console.log("✅ Dati caricati da IndexedDB. Rieseguo renderAll...");
-                if (typeof renderAll === 'function') {
-                  const activeSec = document.querySelector('.section.active');
-                  renderAll(activeSec ? activeSec.id.replace('section-','') : undefined);
-                }
-            } else {
-                // Dexie vuoto → migra dati localStorage in background (transazione unica: o tutte
-                // le tabelle si popolano, o nessuna, mai una migrazione parziale)
-                console.log("🔄 IndexedDB vuoto, migrazione dati iniziali da LocalStorage...");
-                await dexieDB.transaction('rw',
-                    dexieDB.clienti, dexieDB.interventi, dexieDB.ricambi,
-                    dexieDB.fornitori, dexieDB.bolle, dexieDB.ordini, dexieDB.inventari, dexieDB.appuntamenti,
-                    async () => {
-                        await Promise.all([
-                            dexieDB.clienti.clear().then(() => dexieDB.clienti.bulkPut(this.clienti)),
-                            dexieDB.interventi.clear().then(() => dexieDB.interventi.bulkPut(this.interventi)),
-                            dexieDB.ricambi.clear().then(() => dexieDB.ricambi.bulkPut(this.ricambi)),
-                            dexieDB.fornitori.clear().then(() => dexieDB.fornitori.bulkPut(this.fornitori)),
-                            dexieDB.bolle.clear().then(() => dexieDB.bolle.bulkPut(this.bolle)),
-                            dexieDB.ordini.clear().then(() => dexieDB.ordini.bulkPut(this.ordini)),
-                            dexieDB.inventari.clear().then(() => dexieDB.inventari.bulkPut(this.inventari)),
-                            dexieDB.appuntamenti.clear().then(() => dexieDB.appuntamenti.bulkPut(this.appuntamenti))
-                        ]);
-                    }
-                );
-                console.log("✅ Migrazione a IndexedDB completata.");
+        const _finalizzaCaricamento = () => {
+            this._migrate(0);
+            this._cacheToLocalStorage();
+            if (typeof renderAll === 'function') {
+              const activeSec = document.querySelector('.section.active');
+              renderAll(activeSec ? activeSec.id.replace('section-','') : undefined);
             }
-        } catch (e) {
-            console.warn("⚠️ Errore durante l'accesso a IndexedDB:", e);
-            // Se Dexie fallisce, i dati localStorage sono già in memoria
+        };
+
+        if (haArchivioCartella) {
+            console.log("🔄 Caricamento dati dalla cartella archivio:", daCartella.dir);
+            const parsa = (nome) => { try { return JSON.parse(files[nome]); } catch (e) { console.warn('⚠️ JSON non valido in ' + nome + ':', e); return null; } };
+            const tab = (nome) => { const v = parsa(nome); return Array.isArray(v) ? v : []; };
+            this.clienti      = tab('clienti.json');
+            this.interventi   = tab('interventi.json');
+            this.ricambi      = tab('ricambi.json');
+            this.fornitori    = tab('fornitori.json');
+            this.bolle        = tab('bolle.json');
+            this.ordini       = tab('ordini.json');
+            this.inventari    = tab('inventari.json');
+            this.appuntamenti = tab('appuntamenti.json');
+            const meta = parsa('meta.json') || {};
+            if (meta.next_id && typeof meta.next_id === 'object' && !Array.isArray(meta.next_id)) {
+                this._nextId = { ...this._nextId, ...meta.next_id };
+            }
+            if (meta.opzioni && typeof meta.opzioni === 'object' && !Array.isArray(meta.opzioni)) {
+                this.opzioni = {
+                    stati:   Array.isArray(meta.opzioni.stati)   && meta.opzioni.stati.length   ? meta.opzioni.stati   : [..._OPZIONI_DEFAULT.stati],
+                    tipi:    Array.isArray(meta.opzioni.tipi)    && meta.opzioni.tipi.length    ? meta.opzioni.tipi    : [..._OPZIONI_DEFAULT.tipi],
+                    esiti:   Array.isArray(meta.opzioni.esiti)   && meta.opzioni.esiti.length   ? meta.opzioni.esiti   : [..._OPZIONI_DEFAULT.esiti],
+                    tecnici: Array.isArray(meta.opzioni.tecnici) && meta.opzioni.tecnici.length ? meta.opzioni.tecnici : [..._OPZIONI_DEFAULT.tecnici],
+                };
+            }
+            _finalizzaCaricamento();
+        } else if (dexieDB) {
+            // Cartella vuota (primo avvio dopo l'upgrade, o archivio spostato/eliminato):
+            // migrazione one-time dai dati esistenti. Da qui in poi IndexedDB viene SOLO
+            // letto, mai più scritto: la cartella è l'unica sorgente primaria.
+            console.log("🔄 Cartella archivio vuota: migrazione one-time da IndexedDB/localStorage...");
+            try {
+                // "IndexedDB vuoto" = NESSUNA delle 8 tabelle contiene record (contare solo
+                // clienti rischiava la perdita degli altri archivi — vedi storico fix).
+                const conteggi = await Promise.all([
+                    dexieDB.clienti.count(), dexieDB.interventi.count(), dexieDB.ricambi.count(),
+                    dexieDB.fornitori.count(), dexieDB.bolle.count(), dexieDB.ordini.count(),
+                    dexieDB.inventari.count(), dexieDB.appuntamenti.count()
+                ]);
+                if (conteggi.reduce((a, b) => a + b, 0) > 0) {
+                    console.log("🔄 Dati completi trovati su IndexedDB: migrazione (incluse firme/PDF)...");
+                    const [cli, inte, ric, forn, bol, ord, inv, app] = await Promise.all([
+                        dexieDB.clienti.toArray(),
+                        dexieDB.interventi.toArray(),
+                        dexieDB.ricambi.toArray(),
+                        dexieDB.fornitori.toArray(),
+                        dexieDB.bolle.toArray(),
+                        dexieDB.ordini.toArray(),
+                        dexieDB.inventari.toArray(),
+                        dexieDB.appuntamenti.toArray()
+                    ]);
+                    this.clienti = cli;
+                    this.interventi = inte;
+                    this.ricambi = ric;
+                    this.fornitori = forn;
+                    this.bolle = bol;
+                    this.ordini = ord;
+                    this.inventari = inv;
+                    this.appuntamenti = app;
+                }
+            } catch (e) {
+                console.warn("⚠️ Lettura IndexedDB per la migrazione fallita (resta la cache localStorage):", e);
+            }
+            // Se Dexie era assente/vuoto, la memoria contiene già la cache leggera di
+            // localStorage (senza firme/PDF): meglio che niente, e il cloud riallinea.
+            _finalizzaCaricamento();
+            // Popola SUBITO la cartella con quanto migrato: il prossimo avvio legge da qui.
+            if (window.ivdFS) {
+                try { await this._salvaSuCartella(); } catch (e) { console.warn('⚠️ Prima scrittura su cartella fallita:', e); }
+            }
+        } else {
+            // Nessun canale archivio (es. app aperta in un browser) e niente Dexie: la
+            // memoria contiene già la cache di localStorage; si prosegue così.
+            _finalizzaCaricamento();
         }
 
         // Da qui in poi la sorgente primaria è stata letta (o si è stabilito che non è
         // disponibile/è vuota): la memoria è autorevole. Solo ora sblocchiamo le scritture
         // distruttive e gestiamo demo/pending-save.
         this._loaded = true;
+        // Rete di sicurezza contatori: allineati sempre al max id realmente presente+1.
+        try { _ricalcolaContatori(); } catch (e) { console.warn('Ricalcolo contatori fallito:', e); }
         this._afterLoad();
 
         // Validazione post-caricamento
@@ -3997,7 +4022,7 @@ const DB = {
         }
     },
 
-    // SALVATAGGIO: Dexie primario, localStorage cache, con garanzia ordered
+    // SALVATAGGIO: cartella archivio primaria (dati/*.json via IPC), localStorage cache
 
     // Audit trail integration
     _lastAuditAction: null,
@@ -4011,40 +4036,37 @@ const DB = {
         this._saveCounter = (this._saveCounter || 0) + 1;
 
         const doSave = async () => {
-            let dexieOk = false;
+            let cartellaOk = false;
 
             // GUARDIA ANTI-PERDITA DATI: se la sorgente primaria non è ancora stata caricata,
             // la memoria potrebbe non riflettere i dati reali (cache leggera senza PDF, o
-            // vuota). Scrivere ora su IndexedDB li sovrascriverebbe irreversibilmente. Rinviamo
-            // la scrittura Dexie: verrà eseguita da _afterLoad() a caricamento completato.
+            // vuota). Scrivere ora sulla cartella li sovrascriverebbe irreversibilmente: la
+            // scrittura viene rinviata e _afterLoad() la eseguirà a caricamento completato.
             // (La cache localStorage qui sotto resta comunque aggiornata, non è distruttiva
             // per la sorgente primaria.)
-            if (dexieDB && !self._loaded) {
+            if (!self._loaded) {
                 self._pendingSave = true;
-                console.warn('⏳ Salvataggio richiesto prima del caricamento dati: scrittura su IndexedDB rinviata.');
-            }
-
-            // 1. Scrivi su IndexedDB (primario)
-            if (dexieDB && self._loaded) {
+                console.warn('⏳ Salvataggio richiesto prima del caricamento dati: scrittura sulla cartella rinviata.');
+            } else {
                 try {
-                    await self._saveToDexie();
-                    dexieOk = true;
+                    await self._salvaSuCartella();
+                    cartellaOk = true;
                 } catch (e) {
-                    console.warn('⚠️ Errore scrittura Dexie:', e);
+                    console.warn('⚠️ Errore scrittura cartella archivio:', e);
                 }
             }
 
-            // 2. Cache su localStorage (sempre, come fallback)
+            // 2. Cache su localStorage (sempre, come fallback di avvio)
             try {
                 self._cacheToLocalStorage();
             } catch (e) {
                 console.error('❌ Errore localStorage:', e);
-                if (!dexieOk) {
-                    console.error('❌❌ CRITICO: dati non salvati né su Dexie né su localStorage!');
+                if (!cartellaOk) {
+                    console.error('❌❌ CRITICO: dati non salvati né sulla cartella né su localStorage!');
                     mostraToast?.('❌ ERRORE SALVATAGGIO: impossibile scrivere i dati!', 'danger');
                     return;
                 }
-                // Dexie (sorgente primaria) ha comunque salvato: i dati sono al sicuro,
+                // La cartella (sorgente primaria) ha comunque salvato: i dati sono al sicuro,
                 // ma la cache veloce di avvio è disallineata finché non si libera spazio.
                 mostraToast?.('⚠️ Dati salvati, ma la cache locale è piena (libera spazio nel browser)', 'warning');
             }
@@ -4085,41 +4107,32 @@ const DB = {
         }
     },
 
-    // Scrive una tabella in modo NON distruttivo: aggiorna/inserisce i record presenti in
-    // memoria (bulkPut) e rimuove SOLO gli id non più presenti (diff mirato). A differenza
-    // del vecchio clear()+bulkPut, la tabella non viene mai svuotata e ripopolata: se il
-    // bulkPut fallisse a metà, i record esistenti restano comunque al loro posto invece di
-    // sparire. Le cancellazioni volontarie (record eliminato dall'utente, "svuota archivi")
-    // continuano a propagarsi correttamente perché quegli id spariscono da `arr`.
-    async _syncTable(table, arr) {
-        const records = Array.isArray(arr) ? arr : [];
-        if (records.length) await table.bulkPut(records);
-        const keep = new Set(records.map(r => r.id));
-        const existingKeys = await table.toCollection().primaryKeys();
-        const toDelete = existingKeys.filter(k => !keep.has(k));
-        if (toDelete.length) await table.bulkDelete(toDelete);
-    },
-
-    async _saveToDexie() {
-        // Transazione unica: se una tabella fallisce, Dexie annulla tutto (nessuna scrittura
-        // parziale). Combinata con _syncTable (put+delete mirato, senza clear() globale),
-        // garantisce che un salvataggio non possa mai lasciare un archivio svuotato.
-        await dexieDB.transaction('rw',
-            dexieDB.clienti, dexieDB.interventi, dexieDB.ricambi,
-            dexieDB.fornitori, dexieDB.bolle, dexieDB.ordini, dexieDB.inventari, dexieDB.appuntamenti,
-            async () => {
-                await Promise.all([
-                    this._syncTable(dexieDB.clienti, this.clienti),
-                    this._syncTable(dexieDB.interventi, this.interventi),
-                    this._syncTable(dexieDB.ricambi, this.ricambi),
-                    this._syncTable(dexieDB.fornitori, this.fornitori),
-                    this._syncTable(dexieDB.bolle, this.bolle),
-                    this._syncTable(dexieDB.ordini, this.ordini),
-                    this._syncTable(dexieDB.inventari, this.inventari),
-                    this._syncTable(dexieDB.appuntamenti, this.appuntamenti)
-                ]);
-            }
-        );
+    // Scrittura dell'archivio sulla cartella locale (sorgente primaria), via IPC verso il
+    // processo main: file JSON per tabella, scritti in modo atomico (tmp + rename) e
+    // serializzati lì da una coda. Restituisce una promise che risolve quando i file sono
+    // a posto (o risolve subito se il canale non esiste, es. app aperta in un browser).
+    _salvaSuCartella() {
+        if (!window.ivdFS) return Promise.resolve();
+        const payload = {
+            'clienti.json':      JSON.stringify(this.clienti),
+            'interventi.json':   JSON.stringify(this.interventi),
+            'ricambi.json':      JSON.stringify(this.ricambi),
+            'fornitori.json':    JSON.stringify(this.fornitori),
+            'bolle.json':        JSON.stringify(this.bolle),
+            'ordini.json':       JSON.stringify(this.ordini),
+            'inventari.json':    JSON.stringify(this.inventari),
+            'appuntamenti.json': JSON.stringify(this.appuntamenti),
+            'meta.json': JSON.stringify({
+                version: this._version,
+                salvato_il: new Date().toISOString(),
+                next_id: this._nextId,
+                opzioni: this.opzioni
+            })
+        };
+        return window.ivdFS.scrivi(payload).catch(e => {
+            console.error('❌ Scrittura archivio su cartella fallita:', e);
+            try { mostraToast('❌ Errore scrittura archivio su cartella: ' + (e.message || e), 'danger'); } catch (e2) {}
+        });
     },
 
     _cacheToLocalStorage() {
@@ -4128,7 +4141,7 @@ const DB = {
         // cache leggera qui sotto — si tiene solo la metadata di ogni firma (data, nome di
         // chi ha firmato) e si scarta il dataUrl pesante, così la cache di avvio non rischia
         // di riempire lo spazio di localStorage. Il dato completo (immagine inclusa) resta
-        // comunque su IndexedDB (_saveToDexie), Supabase e nel backup JSON.
+        // comunque sulla cartella archivio (dati/clienti.json), su Supabase e nel backup JSON.
         const clientiLeggeri = this.clienti.map(c => {
             if (!c.firme || !c.firme.length) return c;
             return { ...c, firme: c.firme.map(({ dataUrl, ...restoFirma }) => restoFirma) };
@@ -4136,8 +4149,8 @@ const DB = {
         localStorage.setItem('ivd_clienti', JSON.stringify(clientiLeggeri));
         // Gli interventi possono contenere PDF/firme in base64 (anche multi-MB per record):
         // localStorage ha un limite di ~5-10MB per origine, quindi qui li escludiamo dalla
-        // cache veloce. Restano comunque salvati per intero su IndexedDB (_saveToDexie),
-        // che non ha questo limite, e vengono ricaricati in memoria da lì ad ogni avvio.
+        // cache veloce. Restano comunque salvati per intero sulla cartella archivio
+        // (dati/interventi.json), che non ha questo limite, e vengono ricaricati da lì ad ogni avvio.
         const interventiLeggeri = this.interventi.map(i => {
             if (!i.pdfMerckData && !i.pdfMerckDataOriginale && !i.pdfMerckFirma && !i.firmaClienteImg) return i;
             const { pdfMerckData, pdfMerckDataOriginale, pdfMerckFirma, firmaClienteImg, ...resto } = i;
@@ -4304,6 +4317,20 @@ const DB = {
 
 
 
+// Rete di sicurezza contatori: allinea ogni contatore _nextId al massimo id realmente
+// presente nell'archivio + 1 (mai all'indietro). Chiamata dopo il caricamento della
+// sorgente primaria: se file/meta.json sono stati editati a mano, o un backup parziale
+// ha riportato indietro un contatore, qui si recupera la coerenza.
+function _ricalcolaContatori() {
+  const map = { clienti:'cliente', interventi:'intervento', ricambi:'ricambio', fornitori:'fornitore', bolle:'bolla', ordini:'ordine', inventari:'inventario', appuntamenti:'appuntamento' };
+  for (const [tbl, sing] of Object.entries(map)) {
+    const max = (DB[tbl] || []).reduce((m, r) => Math.max(m, (r && Number(r.id)) || 0), 0);
+    DB._nextId[sing] = Math.max(DB._nextId[sing] || 0, max + 1);
+  }
+  const maxLotto = (DB.ricambi || []).reduce((m, r) => Math.max(m, ...(Array.isArray(r && r.lotti) ? r.lotti.map(l => (l && Number(l.id)) || 0) : [0])), 0);
+  DB._nextId.lotto = Math.max(DB._nextId.lotto || 0, maxLotto + 1);
+}
+
 // ======================== GUARDIA MULTI-SCHEDA ========================
 // Riallinea i contatori _nextId locali con l'ultimo valore salvato (mai all'indietro,
 // solo in avanti), per ridurre il rischio di ID duplicati tra schede diverse.
@@ -4467,7 +4494,7 @@ window.addEventListener('beforeunload', () => {
   initMultiTabGuard();
 
   // NOTA: il caricamento dei dati demo NON avviene più qui. Prima girava in modo sincrono
-  // all'avvio — cioè PRIMA che _loadFromDexie() avesse letto IndexedDB in memoria — e quando
+  // all'avvio — cioè PRIMA che _caricaArchivioLocale() avesse letto la cartella in memoria — e quando
   // localStorage risultava vuoto ma IndexedDB conteneva ancora i dati reali, vedeva la memoria
   // vuota, caricava i dati demo e li salvava sovrascrivendo il DB reale (perdita dati
   // all'apertura). Ora è gestito da DB._afterLoad(), che scatta solo a caricamento primario
@@ -4481,27 +4508,18 @@ window.addEventListener('beforeunload', () => {
     });
   });
 
-  // Inizializza auto-backup e mostra stato nella card
-  initAutoBackup().then(() => {
-    const info = document.getElementById('autoBackupInfo');
-    if (!info) return;
-    if (_autoBackupDirHandle) {
-      info.innerHTML = `✅ Backup automatico attivo nella cartella: <strong>${_autoBackupDirHandle.name}</strong> (rotazione ultime 5 versioni)`;
-    } else if (!('showDirectoryPicker' in window)) {
-      info.textContent = '⚠️ Browser non supportato — usa il backup manuale.';
-    } else {
-      info.textContent = 'Nessuna cartella impostata — clicca "Imposta posizione file".';
-    }
-  });
+  // Stato della card "Archivio locale" (cartella dati + backups/)
+  aggiornaInfoArchivio();
 
   // Quando la pagina viene nascosta (chiusura tab, switch app, standby) forziamo la
-  // persistenza dello stato corrente: prima un salvataggio su IndexedDB (più affidabile qui
-  // che in beforeunload, che non attende le operazioni asincrone), poi il backup su file.
-  // Così l'ultimo stato non resta bloccato solo nella cache leggera di localStorage.
+  // persistenza dello stato corrente: prima un salvataggio sulla cartella (più affidabile
+  // qui che in beforeunload, che non attende le operazioni asincrone), poi lo snapshot di
+  // backup (throttle 10 min). Così l'ultimo stato non resta bloccato solo nella cache
+  // leggera di localStorage.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'hidden') return;
     try { if (DB._loaded) DB.save(); } catch (e) {}
-    _scriviAutoBackup();
+    _scriviAutoBackup('uscita');
   });
 
   try { initHScrollHints(); } catch (e) { console.warn('initHScrollHints fallita:', e); }
@@ -6775,6 +6793,10 @@ const SUPABASE = {
       this._session = session;
       this.isLoggedIn = true;
       this.onLoginSuccess();
+      // Attende il caricamento dell'archivio su cartella PRIMA di sincronizzare: syncDown
+      // sostituisce le tabelle e riscrive l'archivio — partire durante il caricamento
+      // poteva far perdere i dati appena letti dalla cartella.
+      try { if (typeof DB !== 'undefined' && DB._loadPromise) await DB._loadPromise; } catch (e) {}
       await this.syncDown();
     }
   },
@@ -6901,7 +6923,7 @@ const SUPABASE = {
   // record INTERI: bastavano un paio di PDF multi-MB a superare la quota di localStorage
   // con un QuotaExceeded a metà ciclo — tabelle parzialmente rimpiazzate in memoria e
   // toast fuorviante "Errore connessione Supabase". I dati completi restano comunque su
-  // IndexedDB (DB._saveToDexie chiamata sotto) e sul cloud.
+  // cartella archivio (dati/*.json, riscritta da DB._salvaSuCartella) e sul cloud.
   _cacheLeggera(tbl, records) {
     if (tbl === 'clienti') {
       return records.map(c => (!c.firme || !c.firme.length) ? c : { ...c, firme: c.firme.map(({ dataUrl, ...resto }) => resto) });
@@ -7178,13 +7200,13 @@ const SUPABASE = {
       if (okCount === 0) { mostraToast('❌ Nessun dato trovato su Supabase.', 'danger'); return false; }
       // BUG FIX: DB.flush() aspetta solo un salvataggio già in corso (this._savePromise) —
       // non scrive nulla di suo. I dati appena scaricati sopra (DB[tbl] = records) venivano
-      // quindi lasciati solo in RAM e nella cache veloce di localStorage, MAI scritti su
-      // IndexedDB (la sorgente "primaria" riletta a ogni avvio in _loadFromDexie()). Al
-      // location.reload() qui sotto, l'app tornava così a caricare i vecchi dati da Dexie,
+      // quindi lasciati solo in RAM e nella cache veloce di localStorage, MAI scritti sulla
+      // sorgente "primaria" riletta a ogni avvio (_caricaArchivioLocale). Al
+      // location.reload() qui sotto, l'app tornava così a caricare i vecchi dati da cartella,
       // vanificando il download appena completato — causa esatta per cui la sincronizzazione
       // sembrava riuscita (stesso last_update) ma i dati scaricati non comparivano mai.
       await DB.flush();
-      await DB._saveToDexie();
+      await DB._salvaSuCartella();
       if (collisioneRilevata) {
         mostraToast('⚠️ Rilevata una collisione di ID tra dispositivi diversi: alcuni record sono stati rinumerati automaticamente per evitare di perderli. Controlla eventuali duplicati.', 'warning');
         await this.syncUp(); // pubblica subito i record rinumerati e il contatore aggiornato
@@ -11132,125 +11154,80 @@ function eseguiRipristinoSelettivo() {
   mostraToast('✅ Ripristino selettivo completato con successo.');
 }
 
-// ======================== AUTO BACKUP SU FILE ========================
-
-const _idb = {
-  db: null,
-  open() {
-    return new Promise((res, rej) => {
-      const req = indexedDB.open('IVD_FS', 1);
-      req.onupgradeneeded = e => e.target.result.createObjectStore('handles');
-      req.onsuccess = e => { this.db = e.target.result; res(); };
-      req.onerror = rej;
-    });
-  },
-  get(key) {
-    return new Promise((res, rej) => {
-      if (!this.db) { rej(new Error('IDB non aperto')); return; }
-      const tx = this.db.transaction('handles', 'readonly');
-      const req = tx.objectStore('handles').get(key);
-      req.onsuccess = e => res(e.target.result);
-      req.onerror = rej;
-    });
-  },
-  set(key, val) {
-    return new Promise((res, rej) => {
-      if (!this.db) { rej(new Error('IDB non aperto')); return; }
-      const tx = this.db.transaction('handles', 'readwrite');
-      const req = tx.objectStore('handles').put(val, key);
-      req.onsuccess = res;
-      req.onerror = rej;
-    });
-  }
-};
-
-let _autoBackupDirHandle = null;
-let _autoBackupScrittura = false;
-
-async function initAutoBackup() {
-  if (!('showDirectoryPicker' in window)) return;
-  try {
-    await _idb.open();
-    const handle = await _idb.get('autoBackupDirHandle');
-    if (!handle) return;
-    const perm = await handle.queryPermission({ mode: 'readwrite' });
-    _autoBackupDirHandle = (perm === 'granted') ? handle : null;
-  } catch(e) { _autoBackupDirHandle = null; }
-}
-
-async function scegliPosizioneAutoBackup() {
-  if (!('showDirectoryPicker' in window)) {
-    mostraToast('Il tuo browser non supporta la scrittura automatica su file.\nUsa il backup manuale dalla sezione Backup/Ripristino.');
+async function _scriviAutoBackup(modalita = 'auto') {
+  if (!window.ivdFS) return;
+  // GUARDIA ANTI-PERDITA DATI: non scrivere snapshot finché la sorgente primaria non è
+  // stata caricata — un backup scritto durante la finestra di caricamento (memoria ancora
+  // vuota/leggera) rischierebbe di riempire la rotazione di snapshot vuoti.
+  if (typeof DB === 'undefined' || !DB._loaded) {
+    console.warn('[AutoBackup] Rinviato: caricamento dati non ancora completato.');
     return;
   }
-  try {
-    // Cartella scelta una sola volta: da qui in poi si scrive senza più mostrare dialoghi,
-    // permettendo una vera rotazione automatica e silenziosa dei file di backup.
-    const handle = await window.showDirectoryPicker({ mode: 'readwrite', startIn: 'documents' });
-    await _idb.open();
-    await _idb.set('autoBackupDirHandle', handle);
-    _autoBackupDirHandle = handle;
-    await _scriviAutoBackup(true);
-    const info = document.getElementById('autoBackupInfo');
-    if (info) info.innerHTML = `✅ Cartella impostata: <strong>${handle.name}</strong>`;
-    mostraToast('✅ Cartella di backup automatico impostata.\nI file verranno aggiornati ad ogni modifica, mantenendo le ultime 5 versioni a rotazione.');
-  } catch(e) {
-    if (e.name !== 'AbortError') mostraToast('Errore nella selezione della cartella: ' + e.message);
-  }
-}
-
-async function _scriviAutoBackup(forzato = false) {
-  if (!_autoBackupDirHandle) return;
-  // GUARDIA ANTI-PERDITA DATI: non scrivere backup finché la sorgente primaria non è stata
-  // caricata. La rotazione tiene solo 5 file: un backup scritto durante la finestra di
-  // caricamento (memoria ancora vuota/leggera) rischierebbe di sovrascrivere in pochi cicli
-  // tutti i backup validi con snapshot vuoti.
-  if (typeof DB !== 'undefined' && !DB._loaded) {
-    if (forzato) console.warn('[AutoBackup] Rinviato: caricamento dati non ancora completato.');
-    return;
-  }
+  const ora = Date.now();
+  if (ora - _ultimoAutoBackup < (_BACKUP_THROTTLE[modalita] || 0)) return;
   if (_autoBackupScrittura) return;
   _autoBackupScrittura = true;
   try {
-    const perm = await _autoBackupDirHandle.queryPermission({ mode: 'readwrite' });
-    if (perm !== 'granted') { _autoBackupDirHandle = null; _autoBackupScrittura = false; return; }
-
-    // BUG FIX: il payload NON includeva `appuntamenti` (a differenza del backup manuale
-    // eseguiBackup). Il file veniva però accettato dal restore: ripristinare da un backup
-    // automatico azzerava TUTTI gli appuntamenti in silenzio.
     const payload = {
       version: '2.0', app: 'IVD Assistenza Tecnica',
       date: new Date().toISOString(),
       data: { clienti: DB.clienti, interventi: DB.interventi, ricambi: DB.ricambi,
                fornitori: DB.fornitori, bolle: DB.bolle, ordini: DB.ordini,
                inventari: DB.inventari, appuntamenti: DB.appuntamenti || [],
-               _nextId: DB._nextId, opzioni: DB.opzioni }
+               _nextId: DB._nextId, opzioni: DB.opzioni },
+      impostazioni: { logo: localStorage.getItem('ivd_logo'),
+                      intestazione: localStorage.getItem('ivd_intestazione'),
+                      tema: localStorage.getItem('ivd_tema') }
     };
-
-    // Rotazione: mantiene le ultime 5 versioni, scrivendo direttamente nella cartella già
-    // autorizzata (nessun dialogo di sistema: getFileHandle su una directory concessa non
-    // richiede un nuovo gesto utente, a differenza di showSaveFilePicker).
-    if (!Number.isInteger(_backupRotCount)) {
-      _backupRotCount = parseInt(localStorage.getItem('ivd_backup_rot_count') || '0', 10) || 0;
+    const res = await window.ivdFS.backupSnapshot(JSON.stringify(payload, null, 2));
+    _ultimoAutoBackup = ora;
+    if (modalita === 'manuale') {
+      mostraToast(`✅ Backup scritto: ${res.nome}\nCartella backups/ — tenuti gli ultimi ${res.tenuti} snapshot.`, 'success');
     }
-    const rotIdx = _backupRotCount % 5;
-    _backupRotCount += 1;
-    localStorage.setItem('ivd_backup_rot_count', String(_backupRotCount));
-    const rotName = `IVD_Backup_AUTO.${rotIdx}.json`;
-
-    const fileHandle = await _autoBackupDirHandle.getFileHandle(rotName, { create: true });
-    const writable = await fileHandle.createWritable();
-    await writable.write(JSON.stringify(payload, null, 2));
-    await writable.close();
-
-    if (forzato) console.log('[AutoBackup] Scritto:', rotName, 'in', _autoBackupDirHandle.name);
-  } catch(e) {
-    console.warn('[AutoBackup] Errore scrittura:', e.message);
+  } catch (e) {
+    console.warn('[AutoBackup] Errore scrittura:', e.message || e);
   } finally {
     _autoBackupScrittura = false;
   }
 }
-let _backupRotCount = null;
+
+// ---- Card "Archivio locale" in Impostazioni → Backup ----
+async function aggiornaInfoArchivio() {
+  const el = document.getElementById('archivioInfo');
+  if (!el) return;
+  if (!window.ivdFS) {
+    el.textContent = 'Modalità browser (senza app desktop): archivio solo su IndexedDB/localStorage.';
+    return;
+  }
+  try {
+    const info = await window.ivdFS.info();
+    el.innerHTML = `📍 <strong>${info.dir}</strong><br>` +
+      `· archivio: ${info.fileDati.length} file JSON · backup: ${info.backups.length} snapshot a rotazione`;
+  } catch (e) {
+    el.textContent = 'Cartella archivio non disponibile: ' + (e.message || e);
+  }
+}
+
+async function apriCartellaArchivio() {
+  if (!window.ivdFS) { mostraToast('Disponibile solo nell\'app desktop.'); return; }
+  await window.ivdFS.apriCartella();
+}
+
+async function spostaArchivioArchivio() {
+  if (!window.ivdFS) { mostraToast('Disponibile solo nell\'app desktop.'); return; }
+  if (!confirm('Spostare l\'archivio (dati + backup) in un\'altra cartella?\n\nL\'app userà la nuova posizione da subito e continuerà a scrivere lì.')) return;
+  try {
+    const res = await window.ivdFS.spostaArchivio();
+    if (res.ok) {
+      mostraToast(`✅ Archivio spostato (${res.copiati} file copiati) in:\n${res.dir}`, 'success');
+      aggiornaInfoArchivio();
+    } else if (res.errore) {
+      mostraToast(res.errore, 'warning');
+    }
+  } catch (e) {
+    mostraToast('Errore nello spostamento: ' + (e.message || e), 'danger');
+  }
+}
 
 function apriModalSvuotaPerFornitore() {
   const sel = document.getElementById('sf_fornitore_id');
