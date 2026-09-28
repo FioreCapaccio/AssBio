@@ -17,7 +17,7 @@ const FILE_WHITELIST = [
   'clienti.json', 'interventi.json', 'ricambi.json', 'fornitori.json',
   'bolle.json', 'ordini.json', 'inventari.json', 'appuntamenti.json', 'meta.json'
 ];
-const BACKUP_KEEP = 14;
+const BACKUP_KEEP = 5;
 
 function leggiConfig() {
   try {
@@ -44,18 +44,25 @@ function risolviCartellaDati() {
 }
 
 let cartellaDati = null;
+// La cartella dei backup automatici è indipendente dall'archivio dati: se l'utente non la
+// imposta esplicitamente (cartellaBackupOverride resta null) segue l'archivio come prima
+// (sottocartella "backups" dentro cartellaDati) — se la imposta (es. un disco esterno), resta
+// lì anche se in seguito l'archivio dati viene spostato altrove.
+let cartellaBackupOverride = null;
+function cartellaBackupAttuale() {
+  return cartellaBackupOverride || path.join(cartellaDati, 'backups');
+}
+
 function percorsi() {
   return {
     root: cartellaDati,
-    dati: path.join(cartellaDati, 'dati'),
-    backups: path.join(cartellaDati, 'backups')
+    dati: path.join(cartellaDati, 'dati')
   };
 }
 
 async function assicuraCartelle() {
-  const { dati, backups } = percorsi();
-  await fsp.mkdir(dati, { recursive: true });
-  await fsp.mkdir(backups, { recursive: true });
+  await fsp.mkdir(percorsi().dati, { recursive: true });
+  await fsp.mkdir(cartellaBackupAttuale(), { recursive: true });
 }
 
 // Coda di scrittura: le richieste IPC arrivano in ordine e vengono eseguite una alla volta.
@@ -74,14 +81,17 @@ async function scriviFileAtomico(filePath, content) {
 
 function registraCanaliArchivio() {
   cartellaDati = risolviCartellaDati();
+  cartellaBackupOverride = leggiConfig().cartellaBackup || null;
 
   ipcMain.handle('archivio:info', async () => {
     await assicuraCartelle();
-    const { dati, backups } = percorsi();
+    const { dati } = percorsi();
+    const backups = cartellaBackupAttuale();
     const elenca = async (dir) => (await fsp.readdir(dir).catch(() => []))
       .filter(f => f.endsWith('.json') && !f.endsWith('.tmp')).sort();
     return {
       dir: cartellaDati,
+      dirBackup: backups,
       fileDati: await elenca(dati),
       backups: await elenca(backups)
     };
@@ -113,11 +123,12 @@ function registraCanaliArchivio() {
   }));
 
   // Snapshot completo dell'archivio scritto dal renderer (che possiede i dati) con
-  // rotazione gestita qui: tengo gli ultimi BACKUP_KEEP file.
+  // rotazione gestita qui: tengo gli ultimi BACKUP_KEEP file. Scrive nella cartella di
+  // backup corrente, che può essere indipendente dall'archivio dati (vedi cartellaBackupAttuale).
   ipcMain.handle('archivio:backupSnapshot', (event, contenuto) => inCoda(async () => {
     if (typeof contenuto !== 'string' || contenuto.length < 2) throw new Error('Snapshot non valido');
     await assicuraCartelle();
-    const { backups } = percorsi();
+    const backups = cartellaBackupAttuale();
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     await scriviFileAtomico(path.join(backups, `ivd-backup-${ts}.json`), contenuto);
     const tutti = (await fsp.readdir(backups).catch(() => []))
@@ -151,17 +162,18 @@ function registraCanaliArchivio() {
     return { ok: true, dir: cartellaDati };
   });
 
-  // Sposta l'archivio corrente (dati/ + backups/) nella cartella scelta, poi usa quella.
-  ipcMain.handle('archivio:sposta', async () => {
-    const res = await dialog.showOpenDialog({
-      title: 'Sposta l\'archivio in una nuova cartella',
-      properties: ['openDirectory', 'createDirectory']
-    });
-    if (res.canceled || !res.filePaths.length) return { ok: false };
-    const destinazione = res.filePaths[0];
+  // Copia dati/ dalla cartella corrente verso `destinazione`, poi la rende l'archivio attivo
+  // per le prossime scritture. La cartella di backup NON viene toccata se è stata impostata
+  // esplicitamente dall'utente (cartellaBackupOverride) — è indipendente per definizione;
+  // se invece segue ancora l'archivio (default), viene copiata insieme così non resta
+  // "orfana" nella vecchia posizione.
+  const spostaVerso = async (destinazione) => {
     if (destinazione === cartellaDati) return { ok: false, errore: 'Cartella identica a quella attuale' };
 
-    const vecchi = percorsi();
+    const vecchiDati = percorsi().dati;
+    const vecchiBackup = cartellaBackupAttuale();
+    const backupSeguivaArchivio = !cartellaBackupOverride;
+
     const copiaDir = async (da, verso) => {
       await fsp.mkdir(verso, { recursive: true });
       let n = 0;
@@ -172,8 +184,8 @@ function registraCanaliArchivio() {
       }
       return n;
     };
-    const nDati = await copiaDir(vecchi.dati, path.join(destinazione, 'dati'));
-    const nBk = await copiaDir(vecchi.backups, path.join(destinazione, 'backups'));
+    const nDati = await copiaDir(vecchiDati, path.join(destinazione, 'dati'));
+    const nBk = backupSeguivaArchivio ? await copiaDir(vecchiBackup, path.join(destinazione, 'backups')) : 0;
 
     const cfg = leggiConfig();
     cfg.cartellaDati = destinazione;
@@ -181,6 +193,52 @@ function registraCanaliArchivio() {
     cartellaDati = destinazione;
     await assicuraCartelle();
     return { ok: true, dir: destinazione, copiati: nDati + nBk };
+  };
+
+  // Sposta l'archivio dati corrente nella cartella scelta, poi usa quella.
+  ipcMain.handle('archivio:sposta', async () => {
+    const res = await dialog.showOpenDialog({
+      title: 'Sposta l\'archivio in una nuova cartella',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (res.canceled || !res.filePaths.length) return { ok: false };
+    return spostaVerso(res.filePaths[0]);
+  });
+
+  // Imposta la cartella dei BACKUP automatici (indipendente dall'archivio dati), con un
+  // percorso digitato/incollato a mano dall'utente in Impostazioni invece che scelto tramite
+  // il selettore di sistema — utile per un disco esterno o una cartella cloud già nota. Il
+  // renderer è sandboxato e non fidato per percorsi di filesystem (vedi nota in preload.js):
+  // il valore ricevuto è sempre trattato come testo grezzo e validato — mai interpolato in
+  // comandi di shell, mai usato per altro che chiamate dirette a fs/path — prima di
+  // accettarlo come nuova destinazione.
+  ipcMain.handle('archivio:impostaCartellaBackup', async (event, percorsoGrezzo) => {
+    if (typeof percorsoGrezzo !== 'string') return { ok: false, errore: 'Percorso non valido' };
+    const percorso = percorsoGrezzo.trim();
+    if (!percorso) return { ok: false, errore: 'Inserisci un percorso' };
+    if (!path.isAbsolute(percorso)) {
+      return { ok: false, errore: 'Il percorso deve essere assoluto (es. ' + (process.platform === 'win32' ? 'C:\\Cartella\\Backup' : '/Users/nome/Cartella') + ')' };
+    }
+    const destinazione = path.resolve(percorso);
+    if (destinazione === cartellaBackupAttuale()) return { ok: false, errore: 'Cartella identica a quella attuale' };
+    try {
+      await fsp.mkdir(destinazione, { recursive: true });
+      await fsp.access(destinazione, fs.constants.W_OK);
+    } catch (e) {
+      return { ok: false, errore: 'Cartella non raggiungibile o non scrivibile: ' + (e.message || e) };
+    }
+    const vecchia = cartellaBackupAttuale();
+    let spostati = 0;
+    for (const f of await fsp.readdir(vecchia).catch(() => [])) {
+      if (!f.endsWith('.json')) continue;
+      await fsp.copyFile(path.join(vecchia, f), path.join(destinazione, f)).catch(() => {});
+      spostati++;
+    }
+    const cfg = leggiConfig();
+    cfg.cartellaBackup = destinazione;
+    salvaConfig(cfg);
+    cartellaBackupOverride = destinazione;
+    return { ok: true, dir: destinazione, spostati };
   });
 }
 

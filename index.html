@@ -3313,12 +3313,24 @@
         <!-- ARCHIVIO LOCALE SU CARTELLA -->
         <div class="backup-card">
           <h4>🗂️ Archivio locale</h4>
-          <p>L'archivio vive in una cartella del tuo computer, in file JSON leggibili, con snapshot di backup automatici a rotazione nella sottocartella <code>backups/</code>. Copiare l'intera cartella equivale a un backup completo.</p>
+          <p>L'archivio vive in una cartella del tuo computer, in file JSON leggibili. Copiare l'intera cartella equivale a un backup completo dei dati (i backup automatici incrementali hanno una cartella propria, indipendente — vedi sotto).</p>
           <div id="archivioInfo" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px;">Rilevamento cartella…</div>
           <div style="display:flex;gap:10px;flex-wrap:wrap;">
             <button class="btn btn-primary" onclick="apriCartellaArchivio()">📂 Apri cartella</button>
             <button class="btn btn-ghost" onclick="spostaArchivioArchivio()">📦 Sposta archivio…</button>
-            <button class="btn btn-ghost" onclick="_scriviAutoBackup('manuale'); setTimeout(aggiornaInfoArchivio, 500);">💾 Backup ora</button>
+            <button class="btn btn-ghost" onclick="_scriviAutoBackup('manuale'); setTimeout(aggiornaInfoBackupAuto, 500);">💾 Backup ora</button>
+          </div>
+        </div>
+
+        <!-- BACKUP AUTOMATICO INCREMENTALE: cartella propria, indipendente dall'archivio -->
+        <div class="backup-card">
+          <h4>🔁 Backup automatico incrementale</h4>
+          <p>Alla chiusura dell'app viene scritto automaticamente uno snapshot completo dei dati in questa cartella, con rotazione sulle ultime 5 copie (la più vecchia viene sovrascritta a ogni nuovo salvataggio). Di default è la sottocartella <code>backups/</code> dentro l'archivio, ma puoi spostarla altrove — es. un disco esterno o una cartella sincronizzata su cloud — digitando o incollando il percorso qui sotto.</p>
+          <div id="backupAutoInfo" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px;">Rilevamento cartella…</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input type="text" id="backupAutoPercorsoInput" class="form-control" style="flex:1;min-width:240px;"
+                   placeholder="/Volumes/DiscoEsterno/Backup IVD  oppure  \\server\condivisa\Backup">
+            <button class="btn btn-ghost" onclick="impostaCartellaBackupManuale()">➡️ Usa questo percorso</button>
           </div>
         </div>
 
@@ -3657,7 +3669,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.9 • 27 set 2026';
+const APP_VERSION = '2.10.10 • 28 set 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -11154,6 +11166,19 @@ function eseguiRipristinoSelettivo() {
   mostraToast('✅ Ripristino selettivo completato con successo.');
 }
 
+// BUG FIX: queste tre variabili erano USATE da _scriviAutoBackup() (throttle e lock di
+// scrittura) ma non erano mai state dichiarate da nessuna parte — ogni chiamata falliva con
+// un ReferenceError su _BACKUP_THROTTLE, che essendo dentro una funzione async diventava una
+// promise rifiutata mai intercettata (nessun errore visibile in UI). Risultato: il backup
+// automatico alla chiusura dell'app (e quello dopo ogni salvataggio) non ha MAI scritto
+// nulla, silenziosamente, da quando è stato introdotto — solo il pulsante "Backup ora" era
+// comunque rotto allo stesso modo. 10 minuti di throttle per 'auto'/'uscita' evitano di
+// riempire la rotazione (solo 5 slot) con snapshot quasi identici ad ogni salvataggio o
+// cambio di finestra; 'manuale' (pulsante esplicito) scrive sempre, senza attesa.
+const _BACKUP_THROTTLE = { auto: 10 * 60 * 1000, uscita: 10 * 60 * 1000, manuale: 0 };
+let _ultimoAutoBackup = 0;
+let _autoBackupScrittura = false;
+
 async function _scriviAutoBackup(modalita = 'auto') {
   if (!window.ivdFS) return;
   // GUARDIA ANTI-PERDITA DATI: non scrivere snapshot finché la sorgente primaria non è
@@ -11194,17 +11219,34 @@ async function _scriviAutoBackup(modalita = 'auto') {
 // ---- Card "Archivio locale" in Impostazioni → Backup ----
 async function aggiornaInfoArchivio() {
   const el = document.getElementById('archivioInfo');
+  if (el) {
+    if (!window.ivdFS) {
+      el.textContent = 'Modalità browser (senza app desktop): archivio solo su IndexedDB/localStorage.';
+    } else {
+      try {
+        const info = await window.ivdFS.info();
+        el.innerHTML = `📍 <strong>${info.dir}</strong><br>· archivio: ${info.fileDati.length} file JSON`;
+      } catch (e) {
+        el.textContent = 'Cartella archivio non disponibile: ' + (e.message || e);
+      }
+    }
+  }
+  aggiornaInfoBackupAuto();
+}
+
+// ---- Card "Backup automatico incrementale": cartella indipendente dall'archivio ----
+async function aggiornaInfoBackupAuto() {
+  const el = document.getElementById('backupAutoInfo');
   if (!el) return;
   if (!window.ivdFS) {
-    el.textContent = 'Modalità browser (senza app desktop): archivio solo su IndexedDB/localStorage.';
+    el.textContent = 'Modalità browser (senza app desktop): nessun backup automatico su cartella.';
     return;
   }
   try {
     const info = await window.ivdFS.info();
-    el.innerHTML = `📍 <strong>${info.dir}</strong><br>` +
-      `· archivio: ${info.fileDati.length} file JSON · backup: ${info.backups.length} snapshot a rotazione`;
+    el.innerHTML = `📍 <strong>${info.dirBackup}</strong><br>· ${info.backups.length} / 5 snapshot a rotazione`;
   } catch (e) {
-    el.textContent = 'Cartella archivio non disponibile: ' + (e.message || e);
+    el.textContent = 'Cartella di backup non disponibile: ' + (e.message || e);
   }
 }
 
@@ -11215,7 +11257,7 @@ async function apriCartellaArchivio() {
 
 async function spostaArchivioArchivio() {
   if (!window.ivdFS) { mostraToast('Disponibile solo nell\'app desktop.'); return; }
-  if (!confirm('Spostare l\'archivio (dati + backup) in un\'altra cartella?\n\nL\'app userà la nuova posizione da subito e continuerà a scrivere lì.')) return;
+  if (!confirm('Spostare l\'archivio (dati) in un\'altra cartella?\n\nL\'app userà la nuova posizione da subito e continuerà a scrivere lì.')) return;
   try {
     const res = await window.ivdFS.spostaArchivio();
     if (res.ok) {
@@ -11226,6 +11268,31 @@ async function spostaArchivioArchivio() {
     }
   } catch (e) {
     mostraToast('Errore nello spostamento: ' + (e.message || e), 'danger');
+  }
+}
+
+// Imposta la cartella dei backup automatici incrementali (indipendente dall'archivio dati)
+// digitando/incollando un percorso a mano — utile per un disco esterno o una cartella
+// sincronizzata su cloud già nota, che sarebbe scomodo raggiungere navigando col Finder.
+// Il percorso viene comunque validato lato main process (deve essere assoluto e scrivibile,
+// vedi archivio:impostaCartellaBackup in main.js) prima di essere usato.
+async function impostaCartellaBackupManuale() {
+  if (!window.ivdFS) { mostraToast('Disponibile solo nell\'app desktop.'); return; }
+  const input = document.getElementById('backupAutoPercorsoInput');
+  const percorso = (input?.value || '').trim();
+  if (!percorso) { mostraToast('Inserisci un percorso prima di procedere.', 'warning'); return; }
+  if (!confirm(`Usare questa cartella per i backup automatici incrementali?\n\n${percorso}\n\nGli snapshot già presenti verranno copiati lì; da subito i nuovi (rotazione sulle ultime 5 copie) verranno scritti nella nuova posizione.`)) return;
+  try {
+    const res = await window.ivdFS.impostaCartellaBackup(percorso);
+    if (res.ok) {
+      mostraToast(`✅ Cartella di backup impostata (${res.spostati} file copiati):\n${res.dir}`, 'success');
+      input.value = '';
+      aggiornaInfoBackupAuto();
+    } else if (res.errore) {
+      mostraToast(res.errore, 'warning');
+    }
+  } catch (e) {
+    mostraToast('Errore: ' + (e.message || e), 'danger');
   }
 }
 
