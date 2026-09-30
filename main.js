@@ -348,69 +348,85 @@ const MERCK_COLLEZIONA_RADICI = `
 `;
 
 // Check per pagina (documento + iframe + shadow DOM): c'è un campo password visibile?
+// (usato da merckScaricaRenderizzato per capire se serve il login)
 const MERCK_CHECK_SCRIPT = `(() => {
   ${MERCK_COLLEZIONA_RADICI}
   const coppia = cercaCoppia();
   return { haPassword: !!coppia, userVuoto: !!(coppia && coppia.u && !coppia.u.value), passVuota: !!(coppia && !coppia.p.value) };
 })()`;
 
-// Script di compilazione: riempie SOLO i campi vuoti (mai sopra il testo digitato
-// dall'utente o precompilato dal portale), SPUNTA la checkbox di accettazione
-// condizioni/privacy richiesta dal portale (es. "agreement" su Salesforce Lightning,
-// senza cui il bottone resta disabilitato) e invia il form quando tutto è completo.
-function merckAutofillScript(credenziali) {
-  return `(() => {
-    const user = ${JSON.stringify(credenziali.user)};
-    const pass = ${JSON.stringify(credenziali.password)};
-    ${MERCK_COLLEZIONA_RADICI}
-    const coppia = cercaCoppia();
-    if (!coppia) return { trovato: false };
-    const { root, p, u } = coppia;
-    let userFilled = false, passFilled = false, userPrecompilato = false, chkSpuntata = false, chkGiaSpuntata = false;
-    const setVal = (el, v) => {
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(el, v);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    };
-    if (u && !u.value) { setVal(u, user); userFilled = true; }
-    else if (u && u.value) { userPrecompilato = true; }
-    if (!p.value) { setVal(p, pass); passFilled = true; }
-    // Spunta obbligatoria (es. "I accept … Terms of Use" su maestro.my.site.com): senza
-    // questa il bottone di login resta DISABLED. Matcha per nome/id noti; in mancanza,
-    // se c'è UNA sola checkbox vuota nella radice del login la spunta comunque.
-    const checkboxes = [...root.querySelectorAll('input[type=checkbox]')].filter(visibile);
-    const giaSpuntate = checkboxes.filter(c => c.checked);
-    chkGiaSpuntata = giaSpuntate.length > 0;
-    const daSpuntare = checkboxes.filter(c => !c.checked && /agre|accept|terms|privacy|consen|condiz|gdpr/i.test((c.id || '') + ' ' + (c.name || '')));
-    if (daSpuntare.length === 0 && checkboxes.length === 1 && checkboxes[0].name === 'agreement') daSpuntare.push(checkboxes[0]);
-    if (daSpuntare.length === 1) { daSpuntare[0].click(); chkSpuntata = true; }
-    // Submit: quando abbiamo completato noi i campi, oppure tutto è già completo
-    // (user+password+spunta) e il bottone — nel frattempo abilitato dal portale —
-    // può essere premuto al tick successivo del polling.
-    const completaSenzaNoi = u && u.value && p.value && (chkSpuntata || chkGiaSpuntata);
-    let submitted = false;
-    if ((userFilled && passFilled) || (passFilled && userPrecompilato) || completaSenzaNoi) {
-      const btn = [...root.querySelectorAll('button, input[type=submit]')].find(b => visibile(b) && (b.type === 'submit' || /log\\s?in|sign\\s?in|accedi|accesso|invia|submit|continua|conferma|entra/i.test(((b.id || '') + ' ' + (b.name || '') + ' ' + (b.value || '') + ' ' + (b.textContent || '')))));
-      if (btn && !btn.disabled) { btn.click(); submitted = true; }
-      else { const form = p.closest('form'); if (form && !btn) { if (form.requestSubmit) form.requestSubmit(); else form.submit(); submitted = true; } }
-    }
-    return { trovato: true, userFilled, passFilled, userPrecompilato, chkSpuntata, submitted };
-  })()`;
+// Click REALE (eventi mouse fidati) alle coordinate viewport indicate: i componenti
+// Salesforce Lightning (LWC) reagiscono come a un vero utente.
+function clickReale(win, x, y) {
+  const px = Math.round(x), py = Math.round(y);
+  win.webContents.sendInputEvent({ type: 'mouseDown', x: px, y: py, button: 'left', clickCount: 1 });
+  win.webContents.sendInputEvent({ type: 'mouseUp', x: px, y: py, button: 'left', clickCount: 1 });
 }
 
-// Prova l'auto-compilazione nella finestra del portale (frame principale + iframe
-// same-origin attraversati dagli script stessi). Ritorna cosa ha trovato/fatto.
+// Auto-compilazione "come un umano": localizza i campi (documento/iframe/shadow DOM),
+// porta il focus su ciascuno e inserisce il testo con webContents.insertText, che genera
+// EVENTI FIDATI identici alla digitazione — è la differenza decisiva rispetto al riempimento
+// via JavaScript: Lightning registra lo stato interno solo con eventi fidati, altrimenti
+// il form si invia con i valori "non visti" dal componente e il server risponde
+// "username o password non corretti" pur essendo giusti. La checkbox di accettazione
+// (es. "I accept … Terms of Use" su maestro.my.site.com, senza cui Sign In resta DISABLED)
+// viene premuta con un vero click del mouse alle sue coordinate. Il bottone si preme solo
+// quando il portale lo ha abilitato, con coordinate fresche (tick successivo al click sulla
+// spunta: il click può far comparire messaggi e spostare il layout).
 async function merckProvaAutofill(win, credenziali) {
-  const esito = { trovato: false, submitted: false };
+  const esito = { trovato: false, userInserito: false, passInserita: false, spuntaMessa: false, submitted: false };
   if (!win || win.isDestroyed()) return esito;
   try {
-    const info = await win.webContents.executeJavaScript(MERCK_CHECK_SCRIPT, true).catch(() => null);
-    if (!info || !info.haPassword) return esito;
+    const stato = await win.webContents.executeJavaScript(`(() => {
+      ${MERCK_COLLEZIONA_RADICI}
+      const coppia = cercaCoppia();
+      if (!coppia) return { trovato: false };
+      const { root, p, u } = coppia;
+      const misura = (el) => {
+        if (!el) return null;
+        try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
+        const r = el.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2, valore: el.value || '', visibile: el.offsetParent !== null };
+      };
+      const checkboxes = [...root.querySelectorAll('input[type=checkbox]')].filter(c => c.offsetParent !== null);
+      const chk = checkboxes.find(c => /agre|accept|terms|privacy|consen|condiz|gdpr/i.test((c.id || '') + ' ' + (c.name || '')))
+        || (checkboxes.length === 1 ? checkboxes[0] : null);
+      const btn = [...root.querySelectorAll('button, input[type=submit]')].find(b => (b.offsetParent !== null) && (b.type === 'submit' || /log\\s?in|sign\\s?in|accedi|accesso|invia|submit|continua|conferma|entra/i.test(((b.id || '') + ' ' + (b.name || '') + ' ' + (b.value || '') + ' ' + (b.textContent || '')))));
+      const btnR = btn ? (() => { try { btn.scrollIntoView({ block: 'center' }); } catch (e) {} const r = btn.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, disabled: btn.disabled }; })() : null;
+      return {
+        trovato: true,
+        user: misura(u), pass: misura(p),
+        chk: chk ? (() => { const r = chk.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, checked: chk.checked }; })() : null,
+        btn: btnR
+      };
+    })()`, true).catch(() => null);
+    if (!stato || !stato.trovato) return esito;
     esito.trovato = true;
-    const res = await win.webContents.executeJavaScript(merckAutofillScript(credenziali), true).catch(() => null);
-    if (res && res.trovato) esito.submitted = !!res.submitted;
-  } catch { /* finestra distrutta: esito parziale */ }
+
+    // Username e password: focus + inserimento come digitazione reale (eventi fidati),
+    // solo se il campo è vuoto — mai sopra il testo dell'utente.
+    if (stato.user && stato.user.visibile && stato.user.valore === '') {
+      await win.webContents.executeJavaScript(`(() => { ${MERCK_COLLEZIONA_RADICI} const c = cercaCoppia(); if (c && c.u) c.u.focus(); return true; })()`, true).catch(() => null);
+      win.webContents.insertText(credenziali.user);
+      esito.userInserito = true;
+    }
+    if (stato.pass && stato.pass.visibile && stato.pass.valore === '') {
+      await win.webContents.executeJavaScript(`(() => { ${MERCK_COLLEZIONA_RADICI} const c = cercaCoppia(); if (c && c.p) c.p.focus(); return true; })()`, true).catch(() => null);
+      win.webContents.insertText(credenziali.password);
+      esito.passInserita = true;
+    }
+    // Spunta obbligatoria con click reale del mouse (solo se non già spuntata)
+    if (stato.chk && !stato.chk.checked) {
+      clickReale(win, stato.chk.x, stato.chk.y);
+      esito.spuntaMessa = true;
+    }
+    // Bottone: si preme solo quando il portale lo ha abilitato, con coordinate fresche —
+    // MAI nello stesso tick in cui è stata messa la spunta (il click può spostare il layout).
+    if (stato.btn && !stato.btn.disabled && !esito.spuntaMessa) {
+      clickReale(win, stato.btn.x, stato.btn.y);
+      esito.submitted = true;
+    }
+  } catch { /* finestra distrutta o pagina in transizione: tick successivo */ }
   return esito;
 }
 
