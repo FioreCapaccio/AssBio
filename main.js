@@ -61,8 +61,8 @@ function percorsi() {
 }
 
 async function assicuraCartelle() {
-  await fsp.mkdir(percorsi().dati, { recursive: true });
-  await fsp.mkdir(cartellaBackupAttuale(), { recursive: true });
+  await scriviConTimeout(fsp.mkdir(percorsi().dati, { recursive: true }));
+  await scriviConTimeout(fsp.mkdir(cartellaBackupAttuale(), { recursive: true }));
 }
 
 // Coda di scrittura: le richieste IPC arrivano in ordine e vengono eseguite una alla volta.
@@ -75,9 +75,26 @@ function inCoda(fn) {
 
 async function scriviFileAtomico(filePath, content) {
   const tmp = filePath + '.tmp';
-  await fsp.writeFile(tmp, content, 'utf8');
-  await fsp.rename(tmp, filePath);
+  await scriviConTimeout(fsp.writeFile(tmp, content, 'utf8'));
+  await scriviConTimeout(fsp.rename(tmp, filePath));
 }
+
+// Timeout sulle operazioni disco: se la cartella archivio risiede in un percorso gestito
+// da una sincronizzazione (es. Documenti con iCloud Drive) read/write/rename possono
+// BLOCCARSI per tempo indefinito (download di file evitti, sync in corso). Senza timeout
+// l'attesa è silenziosa e infinita: il renderer resta "non caricato" e TUTTI i salvataggi
+// vengono rinviati per sempre senza alcun errore visibile. Con il timeout l'operazione
+// fallisce subito, il renderer avvisa l'utente e riprova.
+function conTimeout(promessa, ms, operazione) {
+  return Promise.race([
+    promessa,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout (${Math.round(ms / 1000)}s) sull'operazione "${operazione}" — la cartella archivio non risponde (iCloud/sync o disco non disponibile?)`)), ms))
+  ]);
+}
+const OP_TIMEOUT_MS = 20000;
+
+function leggiFileConTimeout(p) { return conTimeout(p, OP_TIMEOUT_MS, 'lettura'); }
+function scriviConTimeout(p) { return conTimeout(p, OP_TIMEOUT_MS, 'scrittura'); }
 
 function registraCanaliArchivio() {
   cartellaDati = risolviCartellaDati();
@@ -102,8 +119,16 @@ function registraCanaliArchivio() {
     const files = {};
     for (const nome of FILE_WHITELIST) {
       try {
-        files[nome] = await fsp.readFile(path.join(dati, nome), 'utf8');
-      } catch { /* file assente: chiave omessa */ }
+        files[nome] = await leggiFileConTimeout(fsp.readFile(path.join(dati, nome), 'utf8'));
+      } catch (e) {
+        // File assente (primo avvio): chiave omessa — è un caso normale.
+        // QUALSIASI altro errore (soprattutto timeout su cartella non raggiungibile)
+        // fa FALLIRE tutto il canale: il renderer deve saper distinguere "cartella
+        // vuota" (può migrarci i dati) da "cartella che non risponde" (non toccarla mai,
+        // sovrascriverla con dati più vecchi sarebbe una perdita silenziosa).
+        if (e && e.code === 'ENOENT') continue;
+        throw e;
+      }
     }
     return { dir: cartellaDati, files };
   });
@@ -581,3 +606,9 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+
+// Profilo userData alternativo per test/diagnostica (es. riprodurre un problema con una
+// copia dell'archivio senza toccare il profilo reale): IVD_USER_DATA_DIR=<cartella>
+if (process.env.IVD_USER_DATA_DIR) {
+  app.setPath('userData', process.env.IVD_USER_DATA_DIR);
+}

@@ -3929,9 +3929,23 @@ const DB = {
     //  3. nemmeno IndexedDB ha dati → resta la cache leggera di localStorage in memoria.
     async _caricaArchivioLocale() {
         let daCartella = null;
+        let letturaFallita = false;
         try {
-            if (window.ivdFS) daCartella = await window.ivdFS.leggiTutto();
-        } catch (e) { console.warn("⚠️ Lettura cartella archivio fallita:", e); }
+            if (window.ivdFS) {
+                // Race con timeout: se la cartella non risponde (es. Documenti su iCloud con
+                // sync bloccato) NON si resta appesi per sempre — prima di questo fix la
+                // lettura appesa lasciava DB._loaded=false e TUTTI i salvataggi venivano
+                // rinviati in silenzio per l'intera sessione (niente appuntamenti salvati,
+                // niente backup, nessun errore visibile).
+                daCartella = await Promise.race([
+                    window.ivdFS.leggiTutto(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout lettura cartella archivio (25s)')), 25000))
+                ]);
+            }
+        } catch (e) {
+            letturaFallita = true;
+            console.warn("⚠️ Lettura cartella archivio fallita:", e);
+        }
 
         const files = (daCartella && daCartella.files) || {};
         const haArchivioCartella = Object.keys(files).length > 0;
@@ -3969,6 +3983,31 @@ const DB = {
                     tecnici: Array.isArray(meta.opzioni.tecnici) && meta.opzioni.tecnici.length ? meta.opzioni.tecnici : [..._OPZIONI_DEFAULT.tecnici],
                 };
             }
+            // PROTEZIONE ANTI-PERDITA: se la cache locale è più RECENTE della cartella,
+            // significa che in una sessione precedente la scrittura su cartella era
+            // fallita/bloccata (es. iCloud) mentre l'utente continuava a lavorare. Prima
+            // sovrascrivendo la memoria con la cartella si PERDEVANO quei dati in silenzio
+            // (es. appuntamenti creati e "spariti"). Chiediamo all'utente e, scegliendo i
+            // dati locali, ripristiniamo i campi pesanti (firme/PDF) dalla cartella.
+            const salvatoIlCache = parseInt(localStorage.getItem('ivd_saved_at') || '0', 10);
+            const salvatoIlCartella = meta.salvato_il ? Date.parse(meta.salvato_il) : 0;
+            if (salvatoIlCache && salvatoIlCartella && salvatoIlCache - salvatoIlCartella > 60000 && !sessionStorage.getItem('ivd_confidenza_cartella_ok')) {
+                const usaCache = confirm(`⚠️ ATTENZIONE\n\nI dati locali di questa macchina sono più RECENTI dell'archivio su cartella:\n\n· cartella: ${fmtDate(dataLocaleDa(meta.salvato_il))} ${String(new Date(meta.salvato_il)).slice(16,21)}\n· dati locali: ${fmtDate(dataLocaleDa(new Date(salvatoIlCache).toISOString()))} ${String(new Date(salvatoIlCache)).slice(16,21)}\n\nQuesto capita quando la scrittura sulla cartella è fallita (iCloud/sync non raggiungibile).\n\nOK = usa i dati locali più recenti (consigliato — gli appuntamenti e le modifiche fatte nella sessione precedente non vengono persi)\nAnnulla = usa i dati della cartella (le modifiche successive all'ultimo salvataggio riuscito andranno perdute)`);
+                if (usaCache) {
+                    this._usaCachePiuRecente(meta.salvato_il);
+                }
+                sessionStorage.setItem('ivd_confidenza_cartella_ok', '1');
+            }
+            _finalizzaCaricamento();
+        } else if (letturaFallita) {
+            // La cartella NON è vuota-benvenuto: NON RISPONDE (timeout/errore). Non va MAI
+            // trattata come "da migrare": sovrascriverla con dati più vecchi cancellerebbe
+            // l'archivio reale. Si prosegue con la cache in memoria e si marca lo stato:
+            // i salvataggi vanno in cache e un retry automatico riscrive la cartella
+            // appena torna raggiungibile.
+            this._archivioBloccato = true;
+            console.warn("⚠️ Cartella archivio non raggiungibile all'avvio: si continua con la cache locale (salvataggi in retry automatico).");
+            setTimeout(() => mostraToast('⚠️ Cartella archivio non raggiungibile all\'avvio (iCloud/sync o disco?).\nI dati sono caricati dalla cache locale: i salvataggi verranno riprovati automaticamente.', 'warning'), 1500);
             _finalizzaCaricamento();
         } else if (dexieDB) {
             // Cartella vuota (primo avvio dopo l'upgrade, o archivio spostato/eliminato):
@@ -4094,30 +4133,55 @@ const DB = {
             // la memoria potrebbe non riflettere i dati reali (cache leggera senza PDF, o
             // vuota). Scrivere ora sulla cartella li sovrascriverebbe irreversibilmente: la
             // scrittura viene rinviata e _afterLoad() la eseguirà a caricamento completato.
-            // (La cache localStorage qui sotto resta comunque aggiornata, non è distruttiva
-            // per la sorgente primaria.)
             if (!self._loaded) {
                 self._pendingSave = true;
                 console.warn('⏳ Salvataggio richiesto prima del caricamento dati: scrittura sulla cartella rinviata.');
-            } else {
+            }
+
+            // 1. Cache su localStorage PRIMA di tutto: è immediata e non può bloccarsi.
+            //    Se la scrittura su cartella fallisse o si bloccasse (iCloud/sync), i dati
+            //    di questa sessione restano comunque nella cache: il retry automatico li
+            //    porterà sulla cartella appena tornata raggiungibile, e all'avvio seguente
+            //    il confronto ivd_saved_at/meta.salvato_il protegge dalla sovrascrittura.
+            let cacheOk = false;
+            try {
+                self._cacheToLocalStorage();
+                try { localStorage.setItem('ivd_saved_at', String(Date.now())); } catch (e2) {}
+                cacheOk = true;
+            } catch (e) {
+                console.error('❌ Errore localStorage:', e);
+            }
+
+            // 2. Scrittura su cartella (sorgente primaria), con timeout lato renderer
+            if (self._loaded) {
                 try {
                     await self._salvaSuCartella();
                     cartellaOk = true;
                 } catch (e) {
-                    console.warn('⚠️ Errore scrittura cartella archivio:', e);
+                    console.warn('⚠️ Errore/timeout scrittura cartella archivio:', e);
                 }
             }
 
-            // 2. Cache su localStorage (sempre, come fallback di avvio)
-            try {
-                self._cacheToLocalStorage();
-            } catch (e) {
-                console.error('❌ Errore localStorage:', e);
-                if (!cartellaOk) {
-                    console.error('❌❌ CRITICO: dati non salvati né sulla cartella né su localStorage!');
-                    mostraToast?.('❌ ERRORE SALVATAGGIO: impossibile scrivere i dati!', 'danger');
-                    return;
-                }
+            if (!cartellaOk && self._loaded) {
+                // Cartella non raggiungibile: niente perdita silenziosa — avviso visibile
+                // (una sola volta per periodo bloccato) + retry automatico ogni 30s.
+                self._pendingSave = true;
+                self._avvisaArchivioBloccato();
+                self._programmaRiprovaCartella();
+            } else if (cartellaOk && self._archivioBloccato) {
+                // Recupero dopo un periodo bloccato: la scrittura è di nuovo riuscita.
+                self._archivioBloccato = false;
+                self._pendingSave = false;
+                console.log('[Archivio] Cartella di nuovo raggiungibile: dati salvati su disco.');
+                try { mostraToast('✅ Cartella archivio di nuovo raggiungibile: dati salvati su disco.', 'success'); } catch (e2) {}
+            }
+
+            if (!cacheOk && !cartellaOk && self._loaded) {
+                console.error('❌❌ CRITICO: dati non salvati né sulla cartella né su localStorage!');
+                mostraToast?.('❌ ERRORE SALVATAGGIO: impossibile scrivere i dati!', 'danger');
+                return;
+            }
+            if (!cacheOk && cartellaOk) {
                 // La cartella (sorgente primaria) ha comunque salvato: i dati sono al sicuro,
                 // ma la cache veloce di avvio è disallineata finché non si libera spazio.
                 mostraToast?.('⚠️ Dati salvati, ma la cache locale è piena (libera spazio nel browser)', 'warning');
@@ -4161,8 +4225,10 @@ const DB = {
 
     // Scrittura dell'archivio sulla cartella locale (sorgente primaria), via IPC verso il
     // processo main: file JSON per tabella, scritti in modo atomico (tmp + rename) e
-    // serializzati lì da una coda. Restituisce una promise che risolve quando i file sono
-    // a posto (o risolve subito se il canale non esiste, es. app aperta in un browser).
+    // serializzati lì da una coda. Race con timeout lato renderer: se l'IPC si blocca
+    // (main occupato, disco non rispondente) il salvataggio fallisce SUBITO e va in
+    // retry, invece di tenere il flusso appeso per sempre. RIFIUTA in caso di errore:
+    // è il chiamante (doSave) a gestire il fallback.
     _salvaSuCartella() {
         if (!window.ivdFS) return Promise.resolve();
         const payload = {
@@ -4181,9 +4247,72 @@ const DB = {
                 opzioni: this.opzioni
             })
         };
-        return window.ivdFS.scrivi(payload).catch(e => {
-            console.error('❌ Scrittura archivio su cartella fallita:', e);
-            try { mostraToast('❌ Errore scrittura archivio su cartella: ' + (e.message || e), 'danger'); } catch (e2) {}
+        return Promise.race([
+            window.ivdFS.scrivi(payload),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout scrittura cartella archivio (25s)')), 25000))
+        ]);
+    },
+
+    // Retry automatico quando la cartella non risponde: ogni 30 secondi viene ritentata
+    // la scrittura finché non riesce. I dati restano intanto al sicuro nella cache
+    // localStorage (scritta PRIMA della cartella in doSave) e in memoria.
+    _programmaRiprovaCartella() {
+        if (this._retryTimer) return;
+        this._retryTimer = setTimeout(() => {
+            this._retryTimer = null;
+            if (this._archivioBloccato && !this._savePromise && typeof this.save === 'function') {
+                console.log('[Archivio] Riprovo la scrittura su cartella...');
+                this.save();
+            }
+        }, 30000);
+    },
+
+    // Avviso all'utente UNA sola volta per periodo bloccato (niente toast ogni 3 salvataggi)
+    _avvisaArchivioBloccato() {
+        if (this._archivioBloccato) return;
+        this._archivioBloccato = true;
+        try {
+            mostraToast('⚠️ ATTENZIONE: la cartella archivio non risponde (iCloud/sync o disco non disponibile?).\nI dati sono al sicuro nella cache locale, ma NON vengono scritti su disco.\nVerranno riprovati automaticamente ogni 30 secondi.', 'warning');
+        } catch (e) {}
+    },
+
+    // Usata all'avvio quando la cache locale è più recente della cartella (scrittura
+    // fallita in una sessione precedente): carica in memoria i dati della cache.
+    _usaCachePiuRecente() {
+        ['clienti', 'interventi', 'ricambi', 'fornitori', 'bolle', 'ordini', 'inventari', 'appuntamenti'].forEach(tbl => {
+            let cache = [];
+            try { const v = JSON.parse(localStorage.getItem('ivd_' + tbl) || '[]'); if (Array.isArray(v)) cache = v; } catch (e) {}
+            if (cache.length) this[tbl] = this._ripristinaCampiPesanti(cache, this[tbl] || [], tbl);
+        });
+        try {
+            const nid = JSON.parse(localStorage.getItem('ivd_nextId'));
+            if (nid && typeof nid === 'object') this._nextId = { ...this._nextId, ...nid };
+        } catch (e) {}
+        try {
+            const saved = JSON.parse(localStorage.getItem('ivd_opzioni')) || {};
+            ['stati', 'tipi', 'esiti', 'tecnici'].forEach(k => { if (Array.isArray(saved[k]) && saved[k].length) this.opzioni[k] = saved[k]; });
+        } catch (e) {}
+        console.warn('[Archivio] Usati i dati locali (cache) più recenti della cartella.');
+    },
+
+    // La cache è "leggera" (esclude firme dataUrl e PDF interventi): quando i dati cache
+    // vincono sulla cartella, i campi pesanti tornano dai record della cartella per id.
+    _ripristinaCampiPesanti(daCache, daCartella, tbl) {
+        const perId = new Map((daCartella || []).map(r => [r.id, r]));
+        return (daCache || []).map(rec => {
+            const full = perId.get(rec.id);
+            if (!full) return rec; // record nuovo della sessione "bloccata": resta
+            const merged = { ...full, ...rec };
+            if (tbl === 'clienti' && Array.isArray(full.firme)) {
+                merged.firme = full.firme.map((fFull, i) => {
+                    const fCache = Array.isArray(rec.firme) ? rec.firme[i] : null;
+                    return fCache ? { ...fFull, ...fCache, dataUrl: (fCache.dataUrl !== undefined ? fCache.dataUrl : fFull.dataUrl) } : fFull;
+                });
+                if (Array.isArray(rec.firme) && rec.firme.length > full.firme.length) {
+                    merged.firme = merged.firme.concat(rec.firme.slice(full.firme.length));
+                }
+            }
+            return merged;
         });
     },
 
@@ -7259,7 +7388,14 @@ const SUPABASE = {
       // vanificando il download appena completato — causa esatta per cui la sincronizzazione
       // sembrava riuscita (stesso last_update) ma i dati scaricati non comparivano mai.
       await DB.flush();
-      await DB._salvaSuCartella();
+      try {
+        await DB._salvaSuCartella();
+      } catch (eScrittura) {
+        // La scrittura su cartella può fallire/andare in timeout (cartella non raggiungibile):
+        // i dati scaricati restano in memoria e nella cache, con retry automatico, ma l'utente
+        // deve saperlo (il messaggio generico "Errore connessione Supabase" fuorviava).
+        mostraToast('⚠️ Dati scaricati in memoria, ma la scrittura su cartella è fallita: ' + (eScrittura.message || eScrittura), 'warning');
+      }
       if (collisioneRilevata) {
         mostraToast('⚠️ Rilevata una collisione di ID tra dispositivi diversi: alcuni record sono stati rinumerati automaticamente per evitare di perderli. Controlla eventuali duplicati.', 'warning');
         await this.syncUp(); // pubblica subito i record rinumerati e il contatore aggiornato
