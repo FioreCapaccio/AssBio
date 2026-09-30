@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, session, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, Menu, shell, session, ipcMain, dialog, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -242,6 +242,220 @@ function registraCanaliArchivio() {
   });
 }
 
+// ============================================================================
+// PORTALE MERCK (scarico chiamate/WO → appuntamenti)
+// Sessione PERSISTENTE separata ('persist:merck'): i cookie sopravvivono ai
+// riavvii, così il login va rifatto solo quando il portale invalida la sessione.
+// Le credenziali NON transitano in chiaro nell'app: l'utente può salvarle nelle
+// Impostazioni (cifrate con safeStorage del sistema operativo — Keychain/DPAPI)
+// e vengono usate SOLO per compilare automaticamente la pagina di login del
+// portale quando la sessione è scaduta; senza credenziali il login resta manuale.
+// La password del portale ruota ogni ~3 mesi: si aggiorna dalla card Impostazioni.
+// ============================================================================
+const MERCK_PARTITION = 'persist:merck';
+let merckFinestraLogin = null;
+let merckHostCorrente = null;
+
+function merckSessione() {
+  return session.fromPartition(MERCK_PARTITION);
+}
+
+function validaUrlPortale(urlGrezzo) {
+  if (typeof urlGrezzo !== 'string') return null;
+  const t = urlGrezzo.trim();
+  if (!/^https?:\/\//i.test(t)) return null;
+  try { return new URL(t).toString(); } catch { return null; }
+}
+
+// Euristiche per riconoscere una pagina di login (sessione scaduta o mai effettuata)
+function paginaDiLogin(html) {
+  if (typeof html !== 'string' || !html) return true;
+  const h = html.slice(0, 400000).toLowerCase();
+  const haPassword = /<input[^>]+type=["']password["']/.test(h);
+  const indiziLogin = /log\s?in|sign\s?in|accedi|autenticazione|password/.test(h);
+  return haPassword && indiziLogin;
+}
+
+// Credenziali salvate: decifrate SOLO qui nel main, mai inviate al renderer
+function merckCredenziali() {
+  const cfg = leggiConfig();
+  if (!cfg.merck || !cfg.merck.passEnc) return null;
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  try {
+    return {
+      user: cfg.merck.user || '',
+      password: safeStorage.decryptString(Buffer.from(cfg.merck.passEnc, 'base64')),
+      aggiornataIl: cfg.merck.aggiornataIl || null
+    };
+  } catch { return null; }
+}
+
+// Script eseguito NELLA pagina di login del portale per compilare i campi e inviare
+// il form. Heuristica generica: primo input email/testo visibile + primo input
+// password visibile + submit (bottone o form). Non tocca campi già compilati (così
+// il login manuale resta sempre possibile).
+function merckAutofillScript(credenziali) {
+  return `(() => {
+    const user = ${JSON.stringify(credenziali.user)};
+    const pass = ${JSON.stringify(credenziali.password)};
+    const visibile = (el) => el && el.offsetParent !== null && !el.disabled && !el.readOnly;
+    const trova = (sel) => [...document.querySelectorAll(sel)].find(visibile);
+    const inpPass = trova('input[type=password]');
+    if (!inpPass) return { riempito: false, motivo: 'nessun campo password' };
+    const inpUser = trova('input[type=email]') || trova('input[type=text]') || trova('input:not([type])');
+    if (!inpUser) return { riempito: false, motivo: 'nessun campo utente' };
+    if (inpUser.value || inpPass.value) return { riempito: false, motivo: 'campi già compilati' };
+    const setVal = (el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(el, v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    setVal(inpUser, user);
+    setVal(inpPass, pass);
+    const btn = trova('button[type=submit], input[type=submit], button[id*=login i], button[name*=login i], input[name*=login i], button[class*=login i], button[id*=Logon]');
+    if (btn) { btn.click(); return { riempito: true, inviato: 'bottone' }; }
+    const form = inpPass.closest('form');
+    if (form) { if (form.requestSubmit) form.requestSubmit(); else form.submit(); return { riempito: true, inviato: 'form' }; }
+    return { riempito: true, inviato: false };
+  })()`;
+}
+
+// Scaricamento via finestra nascosta con rendering completo: serve per i portali
+// "SPA" (es. Salesforce Lightning) dove il semplice fetch restituisce la shell
+// senza dati. Se la pagina caricata è quella di login e ci sono credenziali
+// salvate, compila e invia il form, poi attende la navigazione post-login.
+async function merckScaricaRenderizzato(url) {
+  const credenziali = merckCredenziali();
+  return await new Promise((resolve) => {
+    let concluso = false;
+    let win = null;
+    const concludi = (ris) => {
+      if (concluso) return;
+      concluso = true;
+      try { if (win && !win.isDestroyed()) win.destroy(); } catch {}
+      resolve(ris);
+    };
+    try {
+      win = new BrowserWindow({
+        show: false, width: 1360, height: 900,
+        webPreferences: { session: merckSessione(), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, navigateOnDragDrop: false }
+      });
+    } catch (e) { resolve({ ok: false, errore: e.message || String(e) }); return; }
+    win.loadURL(url).catch(() => {});
+    win.webContents.on('did-fail-load', (e, code, desc, vurl, isMainFrame) => {
+      if (isMainFrame) concludi({ ok: false, errore: 'Caricamento pagina fallito: ' + desc });
+    });
+    win.webContents.on('did-finish-load', async () => {
+      try {
+        const info = await win.webContents.executeJavaScript(`(() => ({ haPassword: !!document.querySelector('input[type=password]'), userVuoto: !(document.querySelector('input[type=email],input[type=text]') || {}).value }))()`).catch(() => null);
+        if (info && info.haPassword && credenziali) {
+          const esito = await win.webContents.executeJavaScript(merckAutofillScript(credenziali)).catch(() => null);
+          if (esito && esito.riempito && esito.inviato) {
+            await new Promise(r => setTimeout(r, 12000)); // attesa navigazione post-login
+          }
+        }
+        await new Promise(r => setTimeout(r, 4000)); // finestra di grazia per il rendering SPA
+        const html = await win.webContents.executeJavaScript('document.documentElement.outerHTML');
+        concludi({ ok: true, html });
+      } catch (e) {
+        concludi({ ok: false, errore: e.message || String(e) });
+      }
+    });
+    setTimeout(() => concludi({ ok: false, errore: 'Timeout caricamento pagina portale (45s)' }), 45000);
+  });
+}
+
+function registraCanaliMerck() {
+  // Credenziali: salvate cifrate (safeStorage), lette solo dal main. La password
+  // NON viene mai restituita al renderer — solo user e data di aggiornamento.
+  ipcMain.handle('merck:salvaCredenziali', (event, user, password) => {
+    if (typeof user !== 'string' || typeof password !== 'string') return { ok: false, errore: 'Valori non validi' };
+    user = user.trim();
+    if (!user) return { ok: false, errore: 'Inserisci lo user del portale' };
+    if (!password) return { ok: false, errore: 'Inserisci la password' };
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, errore: 'Cifratura del sistema operativo non disponibile: la password non può essere salvata in sicurezza.' };
+    const cfg = leggiConfig();
+    cfg.merck = { user, passEnc: safeStorage.encryptString(password).toString('base64'), aggiornataIl: new Date().toISOString() };
+    salvaConfig(cfg);
+    return { ok: true, user, aggiornataIl: cfg.merck.aggiornataIl };
+  });
+
+  ipcMain.handle('merck:credenzialiInfo', () => {
+    const c = merckCredenziali();
+    return { presente: !!c, user: c ? c.user : '', aggiornataIl: c ? c.aggiornataIl : null };
+  });
+
+  // Apre la finestra di login sul portale. Quando appare la pagina di login e ci
+  // sono credenziali salvate, i campi vengono compilati e inviati automaticamente.
+  ipcMain.handle('merck:login', (event, urlGrezzo) => {
+    const url = validaUrlPortale(urlGrezzo);
+    if (!url) return { ok: false, errore: 'URL del portale non valido (deve iniziare con https://)' };
+    merckHostCorrente = new URL(url).hostname;
+    if (merckFinestraLogin && !merckFinestraLogin.isDestroyed()) { merckFinestraLogin.focus(); return { ok: true }; }
+    merckFinestraLogin = new BrowserWindow({
+      width: 1180, height: 880, title: 'Accesso al portale Merck', backgroundColor: '#f5f5f7',
+      webPreferences: { session: merckSessione(), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, navigateOnDragDrop: false }
+    });
+    merckFinestraLogin.setMenuBarVisibility(false);
+    merckFinestraLogin.webContents.on('did-finish-load', async () => {
+      try {
+        const credenziali = merckCredenziali();
+        if (!credenziali || !merckFinestraLogin || merckFinestraLogin.isDestroyed()) return;
+        const info = await merckFinestraLogin.webContents.executeJavaScript(`(() => { const p = document.querySelector('input[type=password]'); const u = document.querySelector('input[type=email],input[type=text]'); return { haPassword: !!p, userVuoto: !!(u && !u.value) }; })()`).catch(() => null);
+        if (info && info.haPassword && info.userVuoto) {
+          await merckFinestraLogin.webContents.executeJavaScript(merckAutofillScript(credenziali)).catch(() => {});
+        }
+      } catch {}
+    });
+    merckFinestraLogin.loadURL(url);
+    merckFinestraLogin.once('closed', () => { merckFinestraLogin = null; });
+    return { ok: true };
+  });
+
+  // Scaricamento HTTP semplice (basta per portali classici a tabelle/HTML)
+  ipcMain.handle('merck:scarica', async (event, urlGrezzo) => {
+    const url = validaUrlPortale(urlGrezzo);
+    if (!url) return { ok: false, errore: 'URL del portale non valido' };
+    merckHostCorrente = new URL(url).hostname;
+    try {
+      const res = await merckSessione().fetch(url, { redirect: 'follow', bypassCustomProtocolHandlers: true });
+      const html = await res.text();
+      return { ok: res.ok, status: res.status, urlFinale: res.url || url, html, sembraLogin: paginaDiLogin(html) };
+    } catch (e) {
+      return { ok: false, errore: 'Errore di rete: ' + (e.message || e) };
+    }
+  });
+
+  // Scaricamento con rendering completo (portali JavaScript/SPA)
+  ipcMain.handle('merck:scaricaRender', async (event, urlGrezzo) => {
+    const url = validaUrlPortale(urlGrezzo);
+    if (!url) return { ok: false, errore: 'URL del portale non valido' };
+    merckHostCorrente = new URL(url).hostname;
+    try {
+      const res = await merckScaricaRenderizzato(url);
+      if (res.ok) res.sembraLogin = paginaDiLogin(res.html);
+      return res;
+    } catch (e) {
+      return { ok: false, errore: e.message || String(e) };
+    }
+  });
+
+  ipcMain.handle('merck:logout', async () => {
+    try { await merckSessione().clearStorageData(); return { ok: true }; }
+    catch (e) { return { ok: false, errore: e.message || String(e) }; }
+  });
+
+  // Debug: salva l'HTML scaricato per calibrare il parser sul portale reale
+  ipcMain.handle('merck:salvaHtml', async (event, html) => {
+    if (typeof html !== 'string' || !html) return { ok: false, errore: 'Nessun HTML da salvare' };
+    const res = await dialog.showSaveDialog({ title: "Salva HTML del portale (per calibrare l'estrazione)", defaultPath: 'merck-pagina.html' });
+    if (res.canceled || !res.filePath) return { ok: false };
+    await fsp.writeFile(res.filePath, html, 'utf8');
+    return { ok: true, percorso: res.filePath };
+  });
+}
+
 // Menu minimale di produzione:
 //  · niente "Toggle Developer Tools" (nel menu di default sono raggiungibili anche nell'app
 //    pacchettizzata);
@@ -321,6 +535,9 @@ app.on('web-contents-created', (event, contents) => {
   // servisse, vanno aperti nel browser di sistema esplicitamente, non dentro l'app.
   contents.setWindowOpenHandler(({ url }) => {
     if (url === '' || url === 'about:blank') return { action: 'allow' };
+    // Finestre del portale Merck (partizione dedicata, cookie separati dall'app):
+    // popup e link del portale restano nell'app. Tutte le altre finestre come prima.
+    if (/^https?:\/\//i.test(url) && contents.session === merckSessione()) return { action: 'allow' };
     if (/^https?:\/\//i.test(url)) {
       shell.openExternal(url); // solo http/https, mai scheme arbitrari (ftp:, smb:, custom)
     }
@@ -330,8 +547,13 @@ app.on('web-contents-created', (event, contents) => {
   // Navigazione diretta (link senza target="_blank", location.href, drag&drop): permessa
   // SOLO verso l'app stessa (reload interno). Tutto il resto viene bloccato; gli URL
   // http/https vengono delegati al browser di sistema.
+  // Eccezione: le finestre del portale Merck (partizione dedicata) navigano liberamente
+  // il portale — compresi i redirect tra host dei sistemi di login (es. Salesforce) —
+  // perché è il loro compito. Gli schemi non-http restano bloccati e nessun'altra
+  // finestra ne beneficia.
   contents.on('will-navigate', (event, url) => {
     if (url === APP_URL || url.startsWith(APP_URL.split('#')[0])) return; // stesso documento (es. reload)
+    if (/^https?:\/\//i.test(url) && contents.session === merckSessione()) return;
     event.preventDefault();
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
   });
@@ -348,6 +570,7 @@ app.on('web-contents-created', (event, contents) => {
 
 app.whenReady().then(() => {
   registraCanaliArchivio();
+  registraCanaliMerck();
   installaMenu();
   createWindow();
   app.on('activate', () => {

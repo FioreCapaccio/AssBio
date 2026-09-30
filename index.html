@@ -1103,7 +1103,10 @@
         <h2>Appuntamenti</h2>
         <p>Pianificazione delle visite tecniche presso i clienti</p>
       </div>
-      <button class="btn btn-primary" onclick="openAppuntamentoModal()">+ Nuovo appuntamento</button>
+      <div style="display:flex; gap:8px;">
+        <button class="btn btn-ghost" onclick="scaricaChiamateMerck()" title="Scarica le chiamate/WO aperte dal portale Merck e creale come appuntamenti">⬇️ Merck</button>
+        <button class="btn btn-primary" onclick="openAppuntamentoModal()">+ Nuovo appuntamento</button>
+      </div>
     </div>
 
     <div class="toolbar" style="padding: 12px 16px;">
@@ -3252,6 +3255,23 @@
   </div>
 </div>
 
+<!-- MODAL PORTALE MERCK: anteprima chiamate/WO → appuntamenti -->
+<div class="modal-overlay" id="modalMerckChiamate">
+  <div class="modal" style="max-width:920px; width:95%;">
+    <div class="modal-header">
+      <h3>⬇️ Chiamate dal portale Merck</h3>
+      <button class="modal-close" onclick="closeModal('modalMerckChiamate')">✕</button>
+    </div>
+    <div class="modal-body" id="merckChiamateBody" style="padding-top:12px;"></div>
+    <div id="merckChiamateFooter" style="display:none;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; padding:12px 20px; border-top:1px solid var(--border);">
+        <button class="btn btn-ghost btn-sm" onclick="merckSalvaHtmlDebug()" title="Salva la pagina scaricata per calibrare l'estrazione sul portale">🐛 Salva HTML (debug)</button>
+        <button class="btn btn-primary" id="btnCreaAppMerck" onclick="confermaCreaAppuntamentiMerck()"></button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL FIRMA CLIENTE (pad firma generico, indipendente dal PDF Merck) -->
 <div class="modal-overlay" id="modalFirmaGenerica">
   <div class="modal" style="max-width:900px;width:96%;">
@@ -3331,6 +3351,26 @@
             <input type="text" id="backupAutoPercorsoInput" class="form-control" style="flex:1;min-width:240px;"
                    placeholder="/Volumes/DiscoEsterno/Backup IVD  oppure  \\server\condivisa\Backup">
             <button class="btn btn-ghost" onclick="impostaCartellaBackupManuale()">➡️ Usa questo percorso</button>
+          </div>
+        </div>
+
+        <!-- PORTALE MERCK: credenziali + stato sessione -->
+        <div class="backup-card">
+          <h4>🔗 Portale Merck</h4>
+          <p>Collegamento al portale Merck: scarica le chiamate/WO aperte e le trasforma in appuntamenti (sezione Appuntamenti → "⬇️ Merck"). Il login va fatto una volta nella finestra dell'app e la sessione resta attiva tra gli avvii; se il portale la invalida, l'app rifà il login da sola con le credenziali salvate qui — cifrate dal sistema operativo, mai in chiaro. La password del portale cambia ogni 3 mesi: aggiornala qui quando scade.</p>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+            <input type="url" id="merckPortalUrl" placeholder="https://portale.merck…" style="flex:1; min-width:220px; padding:8px 10px; border-radius:8px; border:1px solid var(--border);" onblur="merckSalvaUrl()">
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+            <input type="text" id="merckUser" placeholder="User del portale (email)" autocomplete="off" style="flex:1; min-width:160px; padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
+            <input type="password" id="merckPassword" placeholder="Password (aggiorna ogni 3 mesi)" autocomplete="new-password" style="flex:1; min-width:160px; padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
+            <button class="btn btn-ghost" onclick="merckSalvaCredenziali()">💾 Salva credenziali</button>
+          </div>
+          <div id="merckStato" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:8px;">—</div>
+          <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <button class="btn btn-primary" onclick="merckApriLogin()">🌐 Accedi al portale</button>
+            <button class="btn btn-ghost" onclick="scaricaChiamateMerck()">⬇️ Scarica chiamate</button>
+            <button class="btn btn-ghost" onclick="merckLogout()" title="Cancella i cookie di sessione del portale">🚪 Dimentica sessione</button>
           </div>
         </div>
 
@@ -5577,6 +5617,7 @@ function showSection(id) {
   // il bottone "☁️ Cloud").
   const navBtn = document.querySelector('nav button[data-section="' + id + '"]');
   if (navBtn) navBtn.classList.add('active');
+  if (id === 'impostazioni' && typeof merckAggiornaStatoCard === 'function') merckAggiornaStatoCard();
   renderAll(id);
 }
 
@@ -9620,6 +9661,348 @@ function renderAppuntamenti() {
   if (_calAppVista === 'calendario') renderCalendarioAppuntamenti();
 }
 
+// ======================== PORTALE MERCK (chiamate → appuntamenti) ========================
+// Scarica l'elenco chiamate/WO aperte dal portale Merck con la sessione dell'app
+// (login una tantum in finestra integrata, oppure credenziali salvate cifrate che
+// rifanno il login in automatico quando la sessione scade) e, dopo anteprima e
+// conferma, crea gli appuntamenti. Una chiamata già presente nell'app — per numero
+// chiamata/WO, negli appuntamenti o già convertita in intervento — NON viene mai
+// proposta né ricreata.
+
+let _merckChiamate = [];   // righe dell'anteprima corrente
+let _merckUltimoHtml = ''; // ultima pagina scaricata (per il debug "Salva HTML")
+
+function merckUrlSalvato() {
+  return (localStorage.getItem('ivd_merck_url') || '').trim();
+}
+
+// Aggiorna la card "Portale Merck" in Impostazioni: URL, credenziali salvate (user +
+// data aggiornamento, MAI la password), disponibilità del ponte desktop.
+async function merckAggiornaStatoCard() {
+  const st = document.getElementById('merckStato');
+  if (!st) return;
+  const urlInput = document.getElementById('merckPortalUrl');
+  const url = merckUrlSalvato();
+  if (urlInput && !urlInput.value && url) urlInput.value = url;
+  let html = url ? `📍 Portale: <strong>${escHtml(trunc(url, 64))}</strong><br>` : '⚠️ URL del portale non impostato: inseriscilo qui sopra.<br>';
+  const info = (window.merckPortal && typeof window.merckPortal.credenzialiInfo === 'function')
+    ? await window.merckPortal.credenzialiInfo().catch(() => null) : null;
+  if (!window.merckPortal) {
+    html += '⚠️ Disponibile solo nell\'app desktop (non nel browser).';
+  } else if (info && info.presente) {
+    html += `👤 User salvato: <strong>${escHtml(info.user)}</strong> — aggiornato il ${fmtDate(dataLocaleDa(info.aggiornataIl))}`;
+  } else {
+    html += '👤 Nessuna credenziale salvata: il login va fatto a mano nella finestra del portale.';
+  }
+  st.innerHTML = html;
+}
+
+function merckSalvaUrl() {
+  const el = document.getElementById('merckPortalUrl');
+  const v = el ? el.value.trim() : '';
+  if (v && !/^https?:\/\//i.test(v)) { mostraToast('L\'URL del portale deve iniziare con https://', 'warning'); return; }
+  if (v) localStorage.setItem('ivd_merck_url', v);
+  else localStorage.removeItem('ivd_merck_url');
+  mostraToast(v ? '✅ URL del portale salvato.' : 'URL del portale rimosso.', 'success');
+  merckAggiornaStatoCard();
+}
+
+async function merckSalvaCredenziali() {
+  if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
+  const u = document.getElementById('merckUser')?.value.trim() || '';
+  const p = document.getElementById('merckPassword')?.value || '';
+  if (!u || !p) { mostraToast('Inserisci user e password del portale.', 'warning'); return; }
+  const res = await window.merckPortal.salvaCredenziali(u, p).catch(e => ({ ok: false, errore: e.message || String(e) }));
+  if (res.ok) {
+    const pw = document.getElementById('merckPassword');
+    if (pw) pw.value = '';
+    mostraToast('✅ Credenziali salvate (cifrate dal sistema operativo). Verranno usate per rifare il login in automatico quando la sessione del portale scade.', 'success');
+  } else {
+    mostraToast('❌ ' + (res.errore || 'Errore nel salvataggio'), 'danger');
+  }
+  merckAggiornaStatoCard();
+}
+
+async function merckApriLogin() {
+  const url = merckUrlSalvato();
+  if (!url) { mostraToast('Imposta prima l\'URL del portale Merck.', 'warning'); return; }
+  if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
+  const res = await window.merckPortal.login(url).catch(e => ({ ok: false, errore: e.message || String(e) }));
+  if (res.ok) mostraToast('Accedi al portale nella finestra aperta (con credenziali salvate il form viene compilato da solo): la sessione resterà attiva.', 'info');
+  else mostraToast('❌ ' + (res.errore || 'Impossibile aprire il portale'), 'danger');
+}
+
+async function merckLogout() {
+  if (!window.merckPortal) return;
+  if (!confirm('Dimenticare la sessione del portale Merck (i cookie di accesso verranno cancellati)?')) return;
+  const res = await window.merckPortal.logout().catch(e => ({ ok: false, errore: e.message }));
+  mostraToast(res.ok ? '🚪 Sessione del portale azzerata.' : '❌ ' + (res.errore || 'Errore'), res.ok ? 'info' : 'danger');
+}
+
+// Deduplica: il numero chiamata/WO è già presente negli appuntamenti (campo chiamata
+// o strumenti[].numeroChiamata) OPPURE tra gli interventi (un WO già lavorato con il
+// flusso PDF non deve tornare come chiamata nuova).
+function _merckNormNum(s) {
+  return String(s || '').trim().toUpperCase().replace(/[\s\u2013\u2014]+/g, '');
+}
+function _merckChiamataGiaPresente(num) {
+  const n = _merckNormNum(num);
+  if (!n) return false;
+  if ((DB.appuntamenti || []).some(a => _merckNormNum(a.chiamata) === n || (a.strumenti || []).some(s => _merckNormNum(s.numeroChiamata) === n))) return true;
+  if ((DB.interventi || []).some(i => _merckNormNum(i.numero) === n)) return true;
+  return false;
+}
+
+// Parsing SOLO di stringhe che assomigliano davvero a date (mai fallback a "oggi":
+// una chiamata con data non leggibile resta senza data, non viene datata male).
+function _merckParsaData(testo) {
+  const t = String(testo || '').trim();
+  if (!t) return '';
+  let m = t.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+  if (m) return m[0];
+  m = t.match(/\b(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})\b/);
+  if (m) {
+    const gg = +m[1], mm = +m[2], aa = +m[3];
+    if (gg >= 1 && gg <= 31 && mm >= 1 && mm <= 12) return `${aa}-${String(mm).padStart(2, '0')}-${String(gg).padStart(2, '0')}`;
+  }
+  return '';
+}
+
+// Parser dell'elenco chiamate: cerca le tabelle con intestazioni riconoscibili
+// (chiamata/WO, data, matricola, cliente, descrizione…); se nessuna combacia, ripiega
+// su un'analisi per riga con regex (WO + data). Da calibrare col bottone "Salva HTML"
+// se il portale ha una struttura diversa.
+const _MERCK_MAPPA_HEADER = [
+  ['numeroChiamata', /chiamata|work\s*order|\bwo\b|case\s*(number|n)|ticket|n\.?\s?°?\s*intervento/i],
+  ['data', /data|date|apertura|inizio\s*prev|programm/i],
+  ['matricola', /matricola|seriale|s\s*\/?\s*n\.?|serial/i],
+  ['strumento', /strumento|modello|apparecchio|instrument|model/i],
+  ['clientePortale', /cliente|ragione|account|ospedale|laboratorio|societ/i],
+  ['problema', /descriz|problema|richiesta|guasto|oggetto|subject|anomal/i],
+  ['statoPortale', /stato|status/i],
+  ['tecnico', /tecnico|technician|assegnat|ingegnere/i]
+];
+
+function parseMerckChiamate(html) {
+  if (!html) return [];
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const chiamate = [];
+  const vedi = (el) => (el ? el.textContent.replace(/\s+/g, ' ').trim() : '');
+
+  for (const tab of doc.querySelectorAll('table')) {
+    const righe = [...tab.querySelectorAll('tr')];
+    if (righe.length < 2) continue;
+    const celleHead = [...righe[0].querySelectorAll('th,td')].map(vedi);
+    if (!celleHead.length) continue;
+    const mapping = celleHead.map(testo => {
+      for (const [campo, re] of _MERCK_MAPPA_HEADER) if (re.test(testo)) return campo;
+      return null;
+    });
+    // Una tabella è valida se riconosce il numero chiamata, oppure data + matricola
+    if (!(mapping.includes('numeroChiamata') || (mapping.includes('data') && mapping.includes('matricola')))) continue;
+
+    for (const tr of righe.slice(1)) {
+      const celle = [...tr.querySelectorAll('td,th')].map(vedi);
+      if (!celle.length || celle.join(' ').length < 5) continue;
+      const c = {};
+      celle.forEach((testo, i) => { const campo = mapping[i]; if (campo && testo && !c[campo]) c[campo] = testo; });
+      const rec = _merckNormalizza(c, celle.join(' '));
+      if (rec) chiamate.push(rec);
+    }
+    if (chiamate.length) break; // la prima tabella valida vince
+  }
+
+  // Fallback senza tabelle: elementi di riga con un WO riconoscibile dentro
+  if (!chiamate.length) {
+    doc.querySelectorAll('tr, li').forEach(el => {
+      const testo = vedi(el);
+      if (!testo || testo.length > 600) return;
+      const rec = _merckNormalizza({}, testo);
+      if (rec) chiamate.push(rec);
+    });
+  }
+
+  // Abbinamento cliente: seriale (priorità, match esatto > sottostringa), poi il nome
+  // cliente riportato dal portale. Senza abbinamento l'appuntamento nasce "da assegnare".
+  chiamate.forEach(c => {
+    if (c.matricola) {
+      const t = trovaClienteDaSeriale(c.matricola);
+      if (t.cliente) {
+        c.clienteId = t.cliente.id;
+        if (!c.strumento && t.strumento) c.strumento = t.strumento.modello;
+      }
+    }
+    if (!c.clienteId && c.clientePortale) {
+      const nome = c.clientePortale.toLowerCase();
+      const cl = DB.clienti.find(x => String(x.ragione || '').toLowerCase() === nome)
+        || DB.clienti.find(x => { const r = String(x.ragione || '').toLowerCase(); return r.length > 4 && (r.includes(nome) || nome.includes(r)); });
+      if (cl) c.clienteId = cl.id;
+    }
+  });
+
+  return chiamate;
+}
+
+function _merckNormalizza(c, testoRiga) {
+  const rec = {
+    numeroChiamata: String(c.numeroChiamata || '').trim(),
+    data: _merckParsaData(c.data),
+    matricola: String(c.matricola || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim(),
+    strumento: String(c.strumento || '').trim(),
+    clientePortale: String(c.clientePortale || '').trim(),
+    problema: String(c.problema || '').trim(),
+    statoPortale: String(c.statoPortale || '').trim(),
+    tecnico: String(c.tecnico || '').trim()
+  };
+  if (!rec.numeroChiamata && testoRiga) {
+    const m = testoRiga.match(/\b(?:WO|CH|CALL)\s?[-–]?\s?(\d{3,10})\b/i) || testoRiga.match(/\bWO\s?[-–]?\s?[A-Z0-9]{2,}-?\d{2,}\b/i);
+    if (m) rec.numeroChiamata = m[0].replace(/\s+/g, '').toUpperCase();
+  }
+  if (!rec.data && testoRiga) rec.data = _merckParsaData(testoRiga);
+  return rec.numeroChiamata ? rec : null;
+}
+
+async function scaricaChiamateMerck() {
+  const url = merckUrlSalvato();
+  if (!url) { mostraToast('Imposta prima l\'URL del portale Merck nelle Impostazioni.', 'warning'); showSection('impostazioni'); return; }
+  if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
+  mostraToast('⏳ Scaricamento dal portale Merck…', 'info');
+
+  let res = await window.merckPortal.scarica(url).catch(e => ({ ok: false, errore: e.message || String(e) }));
+  if (!res.ok) { mostraToast('❌ ' + (res.errore || 'Scaricamento fallito'), 'danger'); return; }
+  if (res.sembraLogin) {
+    mostraToast('🔐 Sessione del portale scaduta o assente: apro il portale per l\'accesso.', 'warning');
+    merckApriLogin();
+    return;
+  }
+
+  let chiamate = parseMerckChiamate(res.html);
+  let html = res.html;
+
+  // Portale SPA (es. Salesforce): il fetch restituisce la shell senza dati →
+  // secondo tentativo con rendering completo (finestra nascosta + login automatico).
+  if (chiamate.length === 0) {
+    mostraToast('Nella pagina non ci sono tabelle riconoscibili: provo il rendering completo (portale JavaScript)…', 'info');
+    const r2 = await window.merckPortal.scaricaRender(url).catch(e => ({ ok: false, errore: e.message || String(e) }));
+    if (r2.ok) {
+      html = r2.html || '';
+      if (r2.sembraLogin) { mostraToast('🔐 Sessione scaduta: apro il portale per l\'accesso.', 'warning'); merckApriLogin(); return; }
+      chiamate = parseMerckChiamate(html);
+    } else {
+      console.warn('[Merck] scaricaRender:', r2.errore);
+    }
+  }
+  _merckUltimoHtml = html;
+
+  // Deduplica: solo le chiamate NON già presenti arrivano all'anteprima
+  const nuove = chiamate.filter(c => !_merckChiamataGiaPresente(c.numeroChiamata));
+  await _merckApriPreview(chiamate, nuove);
+}
+
+function merckSalvaHtmlDebug() {
+  if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
+  if (!_merckUltimoHtml) { mostraToast('Nessuna pagina scaricata da salvare.', 'warning'); return; }
+  window.merckPortal.salvaHtml(_merckUltimoHtml).then(res => {
+    if (res.ok) mostraToast('HTML salvato in:\n' + res.percorso + '\n\nInvia questo file per calibrare l\'estrazione.', 'success');
+  });
+}
+
+async function _merckApriPreview(chiamate, nuove) {
+  _merckChiamate = nuove.map(c => ({ ...c, _selezionata: true }));
+  openModal('modalMerckChiamate');
+  if (!_merckChiamate.length) {
+    document.getElementById('merckChiamateBody').innerHTML = `
+      <div class="empty-state" style="padding:30px 20px;">
+        <div style="font-size:2rem;">${chiamate.length ? '✅' : '🤔'}</div>
+        <p style="margin:10px 0;">${chiamate.length
+          ? `Trovate ${chiamate.length} chiamata/e sul portale, ma sono <strong>tutte già presenti</strong> nell'app.<br>Niente da importare.`
+          : `Nessuna chiamata riconoscibile nella pagina scaricata.<br>Potrebbe non esserci nessuna chiamata aperta, oppure la pagina va calibrata per il portale.`}</p>
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+          ${chiamate.length ? '' : '<button class="btn btn-ghost btn-sm" onclick="merckSalvaHtmlDebug()">🐛 Salva HTML per analisi</button>'}
+          <button class="btn btn-ghost btn-sm" onclick="closeModal('modalMerckChiamate')">Chiudi</button>
+        </div>
+      </div>`;
+    document.getElementById('merckChiamateFooter').style.display = 'none';
+    return;
+  }
+  _merckRenderPreview();
+}
+
+function _merckRenderPreview() {
+  const body = document.getElementById('merckChiamateBody');
+  const righe = _merckChiamate.map((c, i) => {
+    const cl = c.clienteId ? DB.clienti.find(x => x.id === c.clienteId) : null;
+    return `<tr style="${c.clienteId ? '' : 'background:rgba(245,158,11,0.08);'}">
+      <td style="text-align:center;"><input type="checkbox" id="merck_sel_${i}" ${c._selezionata ? 'checked' : ''} onchange="_merckToggle(${i}, this.checked)"></td>
+      <td style="white-space:nowrap;">${c.data ? fmtDate(c.data) : '—'}</td>
+      <td><strong>${escHtml(c.numeroChiamata || '—')}</strong></td>
+      <td>${cl ? escHtml(trunc(cl.ragione, 32)) : '<span style="color:#f59e0b;font-weight:600;">⚠️ da assegnare</span>'}</td>
+      <td>${escHtml(c.strumento || '—')}${c.matricola ? '<br><small style="font-family:monospace;color:var(--text-muted);">' + escHtml(c.matricola) + '</small>' : ''}</td>
+      <td title="${escAttr(c.problema || '')}">${escHtml(trunc(c.problema || '—', 70))}</td>
+    </tr>`;
+  }).join('');
+  body.innerHTML = `
+    <p style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px;">Le righe evidenziate in giallo hanno la matricola non riconosciuta nell'archivio: l'appuntamento verrà creato con cliente <em>da assegnare</em>. Deseleziona eventuali righe da non importare.</p>
+    <div style="max-height:48vh; overflow:auto;">
+      <table class="table" style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+        <thead><tr style="background:var(--surface2); border-bottom:2px solid var(--border);">
+          <th style="width:30px;"></th><th>Data</th><th>Chiamata/WO</th><th>Cliente</th><th>Strumento</th><th>Problema</th>
+        </tr></thead>
+        <tbody>${righe}</tbody>
+      </table>
+    </div>`;
+  document.getElementById('merckChiamateFooter').style.display = '';
+  _merckAggiornaConteggio();
+}
+
+function _merckToggle(i, val) {
+  _merckChiamate[i]._selezionata = val;
+  _merckAggiornaConteggio();
+}
+
+function _merckAggiornaConteggio() {
+  const n = _merckChiamate.filter(c => c._selezionata).length;
+  const btn = document.getElementById('btnCreaAppMerck');
+  if (btn) btn.textContent = `✅ Crea ${n} appuntament${n === 1 ? 'o' : 'i'}`;
+}
+
+async function confermaCreaAppuntamentiMerck() {
+  const selezionate = _merckChiamate.filter(c => c._selezionata);
+  if (!selezionate.length) { mostraToast('Nessuna riga selezionata.', 'warning'); return; }
+  // Doppio controllo anti-duplicato al momento della creazione (l'elenco può essere
+  // rimasto aperto mentre un altro scaricamento creava le stesse chiamate)
+  const daCreare = selezionate.filter(c => !_merckChiamataGiaPresente(c.numeroChiamata));
+  const saltate = selezionate.length - daCreare.length;
+  if (!daCreare.length) { mostraToast('Tutte le chiamate selezionate risultano già presenti.', 'info'); return; }
+
+  let creati = 0;
+  daCreare.forEach(c => {
+    const app = {
+      id: DB.nextId('appuntamento'),
+      clienteId: c.clienteId || null,
+      data: c.data || today(),
+      oraInizio: '', oraFine: '',
+      stato: 'Programmato',
+      strumenti: [{ modello: c.strumento || '', seriale: c.matricola || '', numeroChiamata: c.numeroChiamata || '', interventoId: null }],
+      strumento: c.strumento || '',
+      seriale: c.matricola || '',
+      problema: c.problema || '',
+      tecnico: c.tecnico || '',
+      note: 'Da portale Merck' + (c.clienteId ? '' : ' — cliente da assegnare'),
+      origine: 'merck',
+      chiamata: c.numeroChiamata || '',
+      createdAt: new Date().toISOString()
+    };
+    DB.appuntamenti.push(app);
+    creati++;
+  });
+  DB.save();
+  DB.auditLog('create', 'appuntamento', null, `Creati ${creati} appuntamenti da portale Merck${saltate ? ` (${saltate} saltate perché già presenti)` : ''}`);
+  closeModal('modalMerckChiamate');
+  renderAll();
+  mostraToast(`✅ Creati ${creati} appuntament${creati === 1 ? 'o' : 'i'} da Merck${saltate ? ` — ${saltate} già presenti, saltate` : ''}.\nGli appuntamenti Merck sono evidenziati in verde acqua nel calendario.`, 'success');
+}
+
 // ======================== CALENDARIO APPUNTAMENTI ========================
 let _calAppVista = 'lista';
 const _calAppOggi = new Date();
@@ -9714,9 +10097,12 @@ function renderCalendarioAppuntamenti() {
     const maxMostrati = 3;
     const eventiHtml = eventiGiorno.slice(0, maxMostrati).map(a => {
       const cl = DB.clienti.find(c => c.id === a.clienteId);
-      const colore = statoColori[a.stato] || '#64748b';
+      // Gli appuntamenti importati dal portale Merck hanno una colorazione dedicata
+      // (verde acqua), riconoscibile a colpo d'occhio rispetto a quelli creati a mano.
+      const colore = a.origine === 'merck' ? '#0d9488' : (statoColori[a.stato] || '#64748b');
       const label = cl ? cl.ragione : 'N/D';
-      return `<div class="cal-event" style="background:${colore};" title="${escAttr(label)}" onclick="event.stopPropagation(); openAppuntamentoModal(${a.id})">${escHtml(label)}</div>`;
+      const titolo = (a.origine === 'merck' ? '📥 Da portale Merck · ' : '') + label + (a.stato ? ' · ' + a.stato : '');
+      return `<div class="cal-event" style="background:${colore};" title="${escAttr(titolo)}" onclick="event.stopPropagation(); openAppuntamentoModal(${a.id})">${escHtml(label)}</div>`;
     }).join('');
     const altriHtml = eventiGiorno.length > maxMostrati ? `<div class="cal-more">+${eventiGiorno.length - maxMostrati} altri</div>` : '';
 

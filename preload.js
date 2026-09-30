@@ -18,3 +18,16 @@ contextBridge.exposeInMainWorld('ivdFS', {
   spostaArchivio: () => ipcRenderer.invoke('archivio:sposta'),
   impostaCartellaBackup: (percorso) => ipcRenderer.invoke('archivio:impostaCartellaBackup', percorso),
 });
+
+// Ponte per il portale Merck (chiamate/WO → appuntamenti). Solo invoke verso canali
+// "merck:*" stretti: le credenziali salvate NON tornano mai al renderer (la password
+// resta nel main, cifrata con safeStorage); il renderer passa solo l'URL del portale.
+contextBridge.exposeInMainWorld('merckPortal', {
+  login: (url) => ipcRenderer.invoke('merck:login', url),
+  scarica: (url) => ipcRenderer.invoke('merck:scarica', url),
+  scaricaRender: (url) => ipcRenderer.invoke('merck:scaricaRender', url),
+  logout: () => ipcRenderer.invoke('merck:logout'),
+  salvaCredenziali: (user, password) => ipcRenderer.invoke('merck:salvaCredenziali', user, password),
+  credenzialiInfo: () => ipcRenderer.invoke('merck:credenzialiInfo'),
+  salvaHtml: (html) => ipcRenderer.invoke('merck:salvaHtml', html),
+});
