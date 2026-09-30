@@ -316,69 +316,86 @@ function merckCredenziali() {
   } catch { return null; }
 }
 
-// Raccoglie il documento corrente + tutti gli iframe SAME-ORIGIN (ricorsivo): molti
-// portali incorporano il form di login in un iframe. Gli script girano nel frame
-// principale (executeJavaScript non ha API frame in Electron 32) e attraversano gli
-// iframe da dentro la pagina.
-const MERCK_COLLEZIONA_DOCUMENTI = `
-  const documenti = [document];
-  const raccogli = (w) => {
+// Raccoglie TUTTE le radici di query della pagina: documento, iframe same-origin e —
+// fondamentale per i portali Salesforce Lightning (LWC) — tutti gli SHADOW DOM aperti.
+// La pagina di login del portale Merck (c-community-login-form) ha ZERO input nel
+// documento piatto: username/password/checkbox vivono tutti dentro lo shadow root.
+const MERCK_COLLEZIONA_RADICI = `
+  const radici = [];
+  const raccogli = (root, w) => {
+    radici.push(root);
     try {
-      [...w.document.querySelectorAll('iframe')].forEach(f => {
-        try { if (f.contentDocument) { documenti.push(f.contentDocument); raccogli(f.contentWindow); } } catch (e) {}
+      [...root.querySelectorAll('iframe')].forEach(f => {
+        try { if (f.contentDocument) raccogli(f.contentDocument, f.contentWindow); } catch (e) {}
       });
     } catch (e) {}
+    try {
+      [...root.querySelectorAll('*')].forEach(el => { if (el.shadowRoot) raccogli(el.shadowRoot, el.shadowRoot); });
+    } catch (e) {}
   };
-  raccogli(window);
+  raccogli(document, window);
+  const visibile = (el) => el && el.offsetParent !== null && !el.disabled && !el.readOnly;
+  const selUser = 'input[type=email], input[name*=user i], input[name*=email i], input[name*=login i], input[name*=account i], input[id*=user i], input[id*=email i], input[id*=login i], input[type=text], input:not([type])';
+  const cercaCoppia = () => {
+    for (const root of radici) {
+      const p = [...root.querySelectorAll('input[type=password]')].find(visibile);
+      if (!p) continue;
+      const u = [...root.querySelectorAll(selUser)].find(el => visibile(el) && el !== p);
+      return { root, p, u };
+    }
+    return null;
+  };
 `;
 
-// Check per pagina (inclusi iframe same-origin): c'è un campo password visibile?
+// Check per pagina (documento + iframe + shadow DOM): c'è un campo password visibile?
 const MERCK_CHECK_SCRIPT = `(() => {
-  ${MERCK_COLLEZIONA_DOCUMENTI}
-  const visibile = (el) => el && el.offsetParent !== null && !el.disabled && !el.readOnly;
-  for (const doc of documenti) {
-    const p = [...doc.querySelectorAll('input[type=password]')].find(visibile);
-    if (!p) continue;
-    const sel = 'input[type=email], input[name*=user i], input[name*=email i], input[name*=login i], input[name*=account i], input[id*=user i], input[id*=email i], input[id*=login i], input[type=text], input:not([type])';
-    const u = [...doc.querySelectorAll(sel)].find(el => visibile(el) && el !== p);
-    return { haPassword: true, haUser: !!u, userVuoto: !!(u && !u.value), passVuota: !!(p && !p.value) };
-  }
-  return { haPassword: false };
+  ${MERCK_COLLEZIONA_RADICI}
+  const coppia = cercaCoppia();
+  return { haPassword: !!coppia, userVuoto: !!(coppia && coppia.u && !coppia.u.value), passVuota: !!(coppia && !coppia.p.value) };
 })()`;
 
 // Script di compilazione: riempie SOLO i campi vuoti (mai sopra il testo digitato
-// dall'utente o precompilato dal portale) e invia il form solo quando ha riempito lui
-// entrambi i campi, oppure solo la password quando lo username era già precompilato.
+// dall'utente o precompilato dal portale), SPUNTA la checkbox di accettazione
+// condizioni/privacy richiesta dal portale (es. "agreement" su Salesforce Lightning,
+// senza cui il bottone resta disabilitato) e invia il form quando tutto è completo.
 function merckAutofillScript(credenziali) {
   return `(() => {
     const user = ${JSON.stringify(credenziali.user)};
     const pass = ${JSON.stringify(credenziali.password)};
-    ${MERCK_COLLEZIONA_DOCUMENTI}
-    const visibile = (el) => el && el.offsetParent !== null && !el.disabled && !el.readOnly;
-    for (const doc of documenti) {
-      const p = [...doc.querySelectorAll('input[type=password]')].find(visibile);
-      if (!p) continue;
-      const sel = 'input[type=email], input[name*=user i], input[name*=email i], input[name*=login i], input[name*=account i], input[id*=user i], input[id*=email i], input[id*=login i], input[type=text], input:not([type])';
-      const u = [...doc.querySelectorAll(sel)].find(el => visibile(el) && el !== p);
-      let userFilled = false, passFilled = false, userPrecompilato = false;
-      const setVal = (el, v) => {
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        setter.call(el, v);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      };
-      if (u && !u.value) { setVal(u, user); userFilled = true; }
-      else if (u && u.value) { userPrecompilato = true; }
-      if (!p.value) { setVal(p, pass); passFilled = true; }
-      let submitted = false;
-      if ((userFilled && passFilled) || (passFilled && userPrecompilato)) {
-        const btn = [...doc.querySelectorAll('button, input[type=submit]')].find(b => visibile(b) && (b.type === 'submit' || /log\\s?in|sign\\s?in|accedi|accesso|invia|submit|continua|conferma|entra/i.test(((b.id || '') + ' ' + (b.name || '') + ' ' + (b.value || '') + ' ' + (b.textContent || '')))));
-        if (btn) { btn.click(); submitted = true; }
-        else { const form = p.closest('form'); if (form) { if (form.requestSubmit) form.requestSubmit(); else form.submit(); submitted = true; } }
-      }
-      return { trovato: true, userFilled, passFilled, userPrecompilato, submitted };
+    ${MERCK_COLLEZIONA_RADICI}
+    const coppia = cercaCoppia();
+    if (!coppia) return { trovato: false };
+    const { root, p, u } = coppia;
+    let userFilled = false, passFilled = false, userPrecompilato = false, chkSpuntata = false, chkGiaSpuntata = false;
+    const setVal = (el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(el, v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    if (u && !u.value) { setVal(u, user); userFilled = true; }
+    else if (u && u.value) { userPrecompilato = true; }
+    if (!p.value) { setVal(p, pass); passFilled = true; }
+    // Spunta obbligatoria (es. "I accept … Terms of Use" su maestro.my.site.com): senza
+    // questa il bottone di login resta DISABLED. Matcha per nome/id noti; in mancanza,
+    // se c'è UNA sola checkbox vuota nella radice del login la spunta comunque.
+    const checkboxes = [...root.querySelectorAll('input[type=checkbox]')].filter(visibile);
+    const giaSpuntate = checkboxes.filter(c => c.checked);
+    chkGiaSpuntata = giaSpuntate.length > 0;
+    const daSpuntare = checkboxes.filter(c => !c.checked && /agre|accept|terms|privacy|consen|condiz|gdpr/i.test((c.id || '') + ' ' + (c.name || '')));
+    if (daSpuntare.length === 0 && checkboxes.length === 1 && checkboxes[0].name === 'agreement') daSpuntare.push(checkboxes[0]);
+    if (daSpuntare.length === 1) { daSpuntare[0].click(); chkSpuntata = true; }
+    // Submit: quando abbiamo completato noi i campi, oppure tutto è già completo
+    // (user+password+spunta) e il bottone — nel frattempo abilitato dal portale —
+    // può essere premuto al tick successivo del polling.
+    const completaSenzaNoi = u && u.value && p.value && (chkSpuntata || chkGiaSpuntata);
+    let submitted = false;
+    if ((userFilled && passFilled) || (passFilled && userPrecompilato) || completaSenzaNoi) {
+      const btn = [...root.querySelectorAll('button, input[type=submit]')].find(b => visibile(b) && (b.type === 'submit' || /log\\s?in|sign\\s?in|accedi|accesso|invia|submit|continua|conferma|entra/i.test(((b.id || '') + ' ' + (b.name || '') + ' ' + (b.value || '') + ' ' + (b.textContent || '')))));
+      if (btn && !btn.disabled) { btn.click(); submitted = true; }
+      else { const form = p.closest('form'); if (form && !btn) { if (form.requestSubmit) form.requestSubmit(); else form.submit(); submitted = true; } }
     }
-    return { trovato: false };
+    return { trovato: true, userFilled, passFilled, userPrecompilato, chkSpuntata, submitted };
   })()`;
 }
 
