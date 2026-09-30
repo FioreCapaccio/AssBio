@@ -280,6 +280,7 @@ function registraCanaliArchivio() {
 const MERCK_PARTITION = 'persist:merck';
 let merckFinestraLogin = null;
 let merckHostCorrente = null;
+let merckAutofillTimer = null;
 
 function merckSessione() {
   return session.fromPartition(MERCK_PARTITION);
@@ -315,35 +316,85 @@ function merckCredenziali() {
   } catch { return null; }
 }
 
-// Script eseguito NELLA pagina di login del portale per compilare i campi e inviare
-// il form. Heuristica generica: primo input email/testo visibile + primo input
-// password visibile + submit (bottone o form). Non tocca campi già compilati (così
-// il login manuale resta sempre possibile).
+// Raccoglie il documento corrente + tutti gli iframe SAME-ORIGIN (ricorsivo): molti
+// portali incorporano il form di login in un iframe. Gli script girano nel frame
+// principale (executeJavaScript non ha API frame in Electron 32) e attraversano gli
+// iframe da dentro la pagina.
+const MERCK_COLLEZIONA_DOCUMENTI = `
+  const documenti = [document];
+  const raccogli = (w) => {
+    try {
+      [...w.document.querySelectorAll('iframe')].forEach(f => {
+        try { if (f.contentDocument) { documenti.push(f.contentDocument); raccogli(f.contentWindow); } } catch (e) {}
+      });
+    } catch (e) {}
+  };
+  raccogli(window);
+`;
+
+// Check per pagina (inclusi iframe same-origin): c'è un campo password visibile?
+const MERCK_CHECK_SCRIPT = `(() => {
+  ${MERCK_COLLEZIONA_DOCUMENTI}
+  const visibile = (el) => el && el.offsetParent !== null && !el.disabled && !el.readOnly;
+  for (const doc of documenti) {
+    const p = [...doc.querySelectorAll('input[type=password]')].find(visibile);
+    if (!p) continue;
+    const sel = 'input[type=email], input[name*=user i], input[name*=email i], input[name*=login i], input[name*=account i], input[id*=user i], input[id*=email i], input[id*=login i], input[type=text], input:not([type])';
+    const u = [...doc.querySelectorAll(sel)].find(el => visibile(el) && el !== p);
+    return { haPassword: true, haUser: !!u, userVuoto: !!(u && !u.value), passVuota: !!(p && !p.value) };
+  }
+  return { haPassword: false };
+})()`;
+
+// Script di compilazione: riempie SOLO i campi vuoti (mai sopra il testo digitato
+// dall'utente o precompilato dal portale) e invia il form solo quando ha riempito lui
+// entrambi i campi, oppure solo la password quando lo username era già precompilato.
 function merckAutofillScript(credenziali) {
   return `(() => {
     const user = ${JSON.stringify(credenziali.user)};
     const pass = ${JSON.stringify(credenziali.password)};
+    ${MERCK_COLLEZIONA_DOCUMENTI}
     const visibile = (el) => el && el.offsetParent !== null && !el.disabled && !el.readOnly;
-    const trova = (sel) => [...document.querySelectorAll(sel)].find(visibile);
-    const inpPass = trova('input[type=password]');
-    if (!inpPass) return { riempito: false, motivo: 'nessun campo password' };
-    const inpUser = trova('input[type=email]') || trova('input[type=text]') || trova('input:not([type])');
-    if (!inpUser) return { riempito: false, motivo: 'nessun campo utente' };
-    if (inpUser.value || inpPass.value) return { riempito: false, motivo: 'campi già compilati' };
-    const setVal = (el, v) => {
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(el, v);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    };
-    setVal(inpUser, user);
-    setVal(inpPass, pass);
-    const btn = trova('button[type=submit], input[type=submit], button[id*=login i], button[name*=login i], input[name*=login i], button[class*=login i], button[id*=Logon]');
-    if (btn) { btn.click(); return { riempito: true, inviato: 'bottone' }; }
-    const form = inpPass.closest('form');
-    if (form) { if (form.requestSubmit) form.requestSubmit(); else form.submit(); return { riempito: true, inviato: 'form' }; }
-    return { riempito: true, inviato: false };
+    for (const doc of documenti) {
+      const p = [...doc.querySelectorAll('input[type=password]')].find(visibile);
+      if (!p) continue;
+      const sel = 'input[type=email], input[name*=user i], input[name*=email i], input[name*=login i], input[name*=account i], input[id*=user i], input[id*=email i], input[id*=login i], input[type=text], input:not([type])';
+      const u = [...doc.querySelectorAll(sel)].find(el => visibile(el) && el !== p);
+      let userFilled = false, passFilled = false, userPrecompilato = false;
+      const setVal = (el, v) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(el, v);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      if (u && !u.value) { setVal(u, user); userFilled = true; }
+      else if (u && u.value) { userPrecompilato = true; }
+      if (!p.value) { setVal(p, pass); passFilled = true; }
+      let submitted = false;
+      if ((userFilled && passFilled) || (passFilled && userPrecompilato)) {
+        const btn = [...doc.querySelectorAll('button, input[type=submit]')].find(b => visibile(b) && (b.type === 'submit' || /log\\s?in|sign\\s?in|accedi|accesso|invia|submit|continua|conferma|entra/i.test(((b.id || '') + ' ' + (b.name || '') + ' ' + (b.value || '') + ' ' + (b.textContent || '')))));
+        if (btn) { btn.click(); submitted = true; }
+        else { const form = p.closest('form'); if (form) { if (form.requestSubmit) form.requestSubmit(); else form.submit(); submitted = true; } }
+      }
+      return { trovato: true, userFilled, passFilled, userPrecompilato, submitted };
+    }
+    return { trovato: false };
   })()`;
+}
+
+// Prova l'auto-compilazione nella finestra del portale (frame principale + iframe
+// same-origin attraversati dagli script stessi). Ritorna cosa ha trovato/fatto.
+async function merckProvaAutofill(win, credenziali) {
+  const esito = { trovato: false, submitted: false };
+  if (!win || win.isDestroyed()) return esito;
+  try {
+    const info = await win.webContents.executeJavaScript(MERCK_CHECK_SCRIPT, true).catch(() => null);
+    if (!info || !info.haPassword) return esito;
+    esito.trovato = true;
+    const res = await win.webContents.executeJavaScript(merckAutofillScript(credenziali), true).catch(() => null);
+    if (res && res.trovato) esito.submitted = !!res.submitted;
+  } catch { /* finestra distrutta: esito parziale */ }
+  return esito;
 }
 
 // Scaricamento via finestra nascosta con rendering completo: serve per i portali
@@ -373,14 +424,22 @@ async function merckScaricaRenderizzato(url) {
     });
     win.webContents.on('did-finish-load', async () => {
       try {
-        const info = await win.webContents.executeJavaScript(`(() => ({ haPassword: !!document.querySelector('input[type=password]'), userVuoto: !(document.querySelector('input[type=email],input[type=text]') || {}).value }))()`).catch(() => null);
-        if (info && info.haPassword && credenziali) {
-          const esito = await win.webContents.executeJavaScript(merckAutofillScript(credenziali)).catch(() => null);
-          if (esito && esito.riempito && esito.inviato) {
-            await new Promise(r => setTimeout(r, 12000)); // attesa navigazione post-login
+        // Auto-login se la pagina mostrata è quella di login: tentativi ripetuti su tutti
+        // i frame (il form può comparire dopo il load, via JavaScript, o stare in un iframe).
+        let inviato = false;
+        if (credenziali) {
+          let nonTrovato = 0;
+          for (let i = 0; i < 8 && !inviato; i++) {
+            await new Promise(r => setTimeout(r, 1000));
+            if (!win || win.isDestroyed()) return;
+            const esito = await merckProvaAutofill(win, credenziali).catch(() => null);
+            if (esito && esito.submitted) inviato = true;
+            else if (!esito || !esito.trovato) { nonTrovato++; if (nonTrovato >= 2) break; } // pagina senza form di login
+            else nonTrovato = 0;
           }
+          if (inviato) await new Promise(r => setTimeout(r, 10000)); // attesa navigazione post-login
         }
-        await new Promise(r => setTimeout(r, 4000)); // finestra di grazia per il rendering SPA
+        await new Promise(r => setTimeout(r, 3000)); // finestra di grazia per il rendering SPA
         const html = await win.webContents.executeJavaScript('document.documentElement.outerHTML');
         concludi({ ok: true, html });
       } catch (e) {
@@ -411,8 +470,10 @@ function registraCanaliMerck() {
     return { presente: !!c, user: c ? c.user : '', aggiornataIl: c ? c.aggiornataIl : null };
   });
 
-  // Apre la finestra di login sul portale. Quando appare la pagina di login e ci
-  // sono credenziali salvate, i campi vengono compilati e inviati automaticamente.
+  // Apre la finestra di login sul portale. L'auto-compilazione NON gira una sola volta al
+  // load: molti portali disegnano il form via JavaScript dopo il caricamento o lo mettono
+  // in un iframe. Polling ogni 900ms per ~15s, su tutti i frame, finché il form non viene
+  // compilato e inviato (o non c'è più la finestra). Senza credenziali salvate: login manuale.
   ipcMain.handle('merck:login', (event, urlGrezzo) => {
     const url = validaUrlPortale(urlGrezzo);
     if (!url) return { ok: false, errore: 'URL del portale non valido (deve iniziare con https://)' };
@@ -423,18 +484,28 @@ function registraCanaliMerck() {
       webPreferences: { session: merckSessione(), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, navigateOnDragDrop: false }
     });
     merckFinestraLogin.setMenuBarVisibility(false);
-    merckFinestraLogin.webContents.on('did-finish-load', async () => {
+    let tick = 0;
+    if (merckAutofillTimer) clearInterval(merckAutofillTimer);
+    merckAutofillTimer = setInterval(async () => {
+      tick++;
       try {
+        if (!merckFinestraLogin || merckFinestraLogin.isDestroyed()) { clearInterval(merckAutofillTimer); merckAutofillTimer = null; return; }
         const credenziali = merckCredenziali();
-        if (!credenziali || !merckFinestraLogin || merckFinestraLogin.isDestroyed()) return;
-        const info = await merckFinestraLogin.webContents.executeJavaScript(`(() => { const p = document.querySelector('input[type=password]'); const u = document.querySelector('input[type=email],input[type=text]'); return { haPassword: !!p, userVuoto: !!(u && !u.value) }; })()`).catch(() => null);
-        if (info && info.haPassword && info.userVuoto) {
-          await merckFinestraLogin.webContents.executeJavaScript(merckAutofillScript(credenziali)).catch(() => {});
+        if (!credenziali) { clearInterval(merckAutofillTimer); merckAutofillTimer = null; return; } // login manuale
+        const esito = await merckProvaAutofill(merckFinestraLogin, credenziali);
+        if (esito.submitted) {
+          console.log('[Merck] Login auto-compilato e inviato dopo', tick, 'tentativi');
+          clearInterval(merckAutofillTimer); merckAutofillTimer = null;
+        } else if (tick >= 16) {
+          clearInterval(merckAutofillTimer); merckAutofillTimer = null;
         }
-      } catch {}
-    });
+      } catch { /* tick successivo */ }
+    }, 900);
     merckFinestraLogin.loadURL(url);
-    merckFinestraLogin.once('closed', () => { merckFinestraLogin = null; });
+    merckFinestraLogin.once('closed', () => {
+      if (merckAutofillTimer) { clearInterval(merckAutofillTimer); merckAutofillTimer = null; }
+      merckFinestraLogin = null;
+    });
     return { ok: true };
   });
 
