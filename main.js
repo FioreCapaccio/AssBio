@@ -371,13 +371,31 @@ const MERCK_CHECK_SCRIPT = `(() => {
 // non può aprire. Fondamentale per capire SE il problema è "non trovo i campi di login su
 // questo portale" (selettori da adattare) oppure "campi trovati ma le credenziali salvate
 // vengono rifiutate" (password da aggiornare, account bloccato dal portale, ecc.).
-function merckInviaDiagnostica(messaggio) {
+// BUG FIX: la card di Impostazioni resta nella finestra PRINCIPALE, nascosta dietro il
+// popup di login quando l'utente ci sta effettivamente guardando — risultato, il messaggio
+// c'era ma restava invisibile all'utente concentrato sul popup. Se `win` (la finestra di
+// login/scarico in corso) è passata, viene mostrato un banner anche lì, sopra la pagina del
+// portale: impossibile non vederlo.
+function merckInviaDiagnostica(messaggio, win) {
   console.log('[Merck]', messaggio);
   try {
     if (finestraPrincipale && !finestraPrincipale.isDestroyed()) {
       finestraPrincipale.webContents.send('merck:diagnostica', messaggio);
     }
   } catch { /* finestra principale non pronta: solo log console */ }
+  if (win && !win.isDestroyed()) {
+    const testoJson = JSON.stringify(String(messaggio));
+    win.webContents.executeJavaScript(`(() => {
+      let el = document.getElementById('__ivd_merck_diag__');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = '__ivd_merck_diag__';
+        el.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:#0d9488;color:#fff;font:13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;padding:10px 16px;box-shadow:0 -2px 10px rgba(0,0,0,.35);';
+        (document.body || document.documentElement).appendChild(el);
+      }
+      el.textContent = '🔎 Assistenza Tecnica IVD — ' + ${testoJson};
+    })()`, true).catch(() => {});
+  }
 }
 
 // Click REALE (eventi mouse fidati) alle coordinate viewport indicate: i componenti
@@ -426,7 +444,7 @@ async function merckProvaAutofill(win, credenziali) {
       };
     })()`, true).catch(() => null);
     if (!stato || !stato.trovato) {
-      merckInviaDiagnostica('Nessun campo di login individuato in questo tentativo (documento, iframe e shadow DOM analizzati) — se la pagina è già quella giusta, il portale potrebbe avere una struttura diversa da quella prevista.');
+      merckInviaDiagnostica('Nessun campo di login individuato in questo tentativo (documento, iframe e shadow DOM analizzati) — se la pagina è già quella giusta, il portale potrebbe avere una struttura diversa da quella prevista.', win);
       return esito;
     }
     esito.trovato = true;
@@ -467,7 +485,7 @@ async function merckProvaAutofill(win, credenziali) {
       esito.userOk = lettura.userValore === credenziali.user;
       esito.passOk = lettura.passValore === credenziali.password;
       if (!esito.userOk || !esito.passOk) {
-        merckInviaDiagnostica(`Verifica inserimento — user: ${esito.userOk ? 'OK' : 'non corrisponde (letti ' + (lettura.userValore || '').length + ' caratteri, attesi ' + credenziali.user.length + ')'} · password: ${esito.passOk ? 'OK' : (lettura.passValore === '' ? 'campo rimasto vuoto' : 'non corrisponde (letti ' + (lettura.passValore || '').length + ' caratteri, attesi ' + credenziali.password.length + ')')}. Provo a correggere…`);
+        merckInviaDiagnostica(`Verifica inserimento — user: ${esito.userOk ? 'OK' : 'non corrisponde (letti ' + (lettura.userValore || '').length + ' caratteri, attesi ' + credenziali.user.length + ')'} · password: ${esito.passOk ? 'OK' : (lettura.passValore === '' ? 'campo rimasto vuoto' : 'non corrisponde (letti ' + (lettura.passValore || '').length + ' caratteri, attesi ' + credenziali.password.length + ')')}. Provo a correggere…`, win);
         // Un solo tentativo di correzione: pulisce DAVVERO il campo (select-all + canc)
         // prima di reinserire, invece di limitarsi a scrivere sopra un valore parziale o
         // duplicato — altrimenti la correzione stessa poteva introdurre un secondo doppione.
@@ -491,10 +509,10 @@ async function merckProvaAutofill(win, credenziali) {
         if (ricontrollo) {
           esito.userOk = ricontrollo.userValore === credenziali.user;
           esito.passOk = ricontrollo.passValore === credenziali.password;
-          merckInviaDiagnostica(`Dopo il tentativo di correzione — user: ${esito.userOk ? 'OK' : 'ancora sbagliato'} · password: ${esito.passOk ? 'OK' : 'ancora sbagliata'}.` + (!esito.userOk || !esito.passOk ? ' Il portale potrebbe bloccare la digitazione automatica su questo campo: prova a scrivere le credenziali a mano in questa finestra.' : ''));
+          merckInviaDiagnostica(`Dopo il tentativo di correzione — user: ${esito.userOk ? 'OK' : 'ancora sbagliato'} · password: ${esito.passOk ? 'OK' : 'ancora sbagliata'}.` + (!esito.userOk || !esito.passOk ? ' Il portale potrebbe bloccare la digitazione automatica su questo campo: prova a scrivere le credenziali a mano in questa finestra.' : ''), win);
         }
       } else {
-        merckInviaDiagnostica(`Credenziali inserite correttamente (user e password verificati carattere per carattere).`);
+        merckInviaDiagnostica(`Credenziali inserite correttamente (user e password verificati carattere per carattere).`, win);
       }
     }
     // Spunta obbligatoria. Le checkbox Salesforce (pattern SLDS) hanno l'input nativo
@@ -541,11 +559,11 @@ async function merckProvaAutofill(win, credenziali) {
     if (stato.btn && !stato.btn.disabled && !esito.spuntaMessa && credenzialiVerificate) {
       clickReale(win, stato.btn.x, stato.btn.y);
       esito.submitted = true;
-      merckInviaDiagnostica('Form inviato. Se il portale risponde ancora "credenziali non valide", il problema è lato portale (password scaduta/da aggiornare, account bloccato dopo tentativi precedenti) — prova ad accedere scrivendo a mano in questa finestra per avere un messaggio d\'errore diretto dal portale.');
+      merckInviaDiagnostica('Form inviato. Se il portale risponde ancora "credenziali non valide", il problema è lato portale (password scaduta/da aggiornare, account bloccato dopo tentativi precedenti) — prova ad accedere scrivendo a mano in questa finestra per avere un messaggio d\'errore diretto dal portale.', win);
     } else if (stato.btn && stato.btn.disabled) {
-      merckInviaDiagnostica('Pulsante di accesso trovato ma ancora disabilitato dal portale (manca qualche condizione, es. la spunta dei termini) — riprovo al prossimo tentativo.');
+      merckInviaDiagnostica('Pulsante di accesso trovato ma ancora disabilitato dal portale (manca qualche condizione, es. la spunta dei termini) — riprovo al prossimo tentativo.', win);
     } else if (stato.btn && !credenzialiVerificate) {
-      merckInviaDiagnostica('Invio evitato: i campi non contengono le credenziali attese nemmeno dopo il tentativo di correzione. Prova a scrivere le credenziali a mano in questa finestra.');
+      merckInviaDiagnostica('Invio evitato: i campi non contengono le credenziali attese nemmeno dopo il tentativo di correzione. Prova a scrivere le credenziali a mano in questa finestra.', win);
     }
   } catch { /* finestra distrutta o pagina in transizione: tick successivo */ }
   return esito;
