@@ -3375,6 +3375,7 @@
             <button class="btn btn-ghost" onclick="scaricaChiamateMerck()">⬇️ Scarica chiamate</button>
             <button class="btn btn-ghost" onclick="merckLogout()" title="Cancella i cookie di sessione del portale">🚪 Dimentica sessione</button>
             <button class="btn btn-ghost" onclick="merckSalvaHtmlLoginDebug()" title="Con la finestra di login aperta, cattura la vera struttura della pagina (anche dentro gli shadow DOM) per calibrare l'autofill">🐛 Salva HTML pagina login</button>
+            <button class="btn btn-ghost" onclick="merckCorreggiNumeriChiamata()" title="Riscarica l'elenco e corregge il numero WO sugli appuntamenti/interventi Merck già importati con il numero sbagliato">🔧 Correggi numeri WO già importati</button>
           </div>
           <div id="merckDiagnostica" style="display:none; margin-top:10px; padding:8px 10px; border-radius:8px; background:var(--surface2); font-size:0.8rem; color:var(--text-muted); border-left:3px solid var(--accent);"></div>
         </div>
@@ -3714,7 +3715,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.26 • 1 ott 2026';
+const APP_VERSION = '2.10.27 • 1 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -10063,19 +10064,15 @@ function _merckNormalizza(c, testoRiga) {
   return rec.numeroChiamata ? rec : null;
 }
 
-async function scaricaChiamateMerck() {
-  const url = merckUrlSalvato();
-  if (!url) { mostraToast('Imposta prima l\'URL del portale Merck nelle Impostazioni.', 'warning'); showSection('impostazioni'); return; }
-  if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
-  mostraToast('⏳ Scaricamento dal portale Merck…', 'info');
-
+// Scaricamento condiviso: fetch semplice + fallback a rendering completo per i portali SPA.
+// Usato sia dallo scaricamento normale (scaricaChiamateMerck) sia dalla correzione in blocco
+// dei numeri WO (merckCorreggiNumeriChiamata) — stessa identica logica, un solo punto da
+// mantenere. Ritorna sempre l'elenco COMPLETO (non deduplicato): a dedupe/preview pensa il
+// chiamante.
+async function merckScaricaElencoGrezzo(url) {
   let res = await window.merckPortal.scarica(url).catch(e => ({ ok: false, errore: e.message || String(e) }));
-  if (!res.ok) { mostraToast('❌ ' + (res.errore || 'Scaricamento fallito'), 'danger'); return; }
-  if (res.sembraLogin) {
-    mostraToast('🔐 Sessione del portale scaduta o assente: apro il portale per l\'accesso.', 'warning');
-    merckApriLogin();
-    return;
-  }
+  if (!res.ok) return { ok: false, errore: res.errore || 'Scaricamento fallito' };
+  if (res.sembraLogin) return { ok: true, sembraLogin: true, chiamate: [], html: res.html || '' };
 
   let chiamate = parseMerckChiamate(res.html);
   let html = res.html;
@@ -10084,7 +10081,6 @@ async function scaricaChiamateMerck() {
   // secondo tentativo con rendering completo (finestra nascosta + login automatico), da cui
   // la tabella elenco viene estratta direttamente dal DOM renderizzato (shadow DOM incluso).
   if (chiamate.length === 0) {
-    mostraToast('Nella pagina non ci sono tabelle riconoscibili: provo il rendering completo (portale JavaScript)…', 'info');
     const r2 = await window.merckPortal.scaricaRender(url).catch(e => ({ ok: false, errore: e.message || String(e) }));
     if (r2.ok) {
       html = r2.html || '';
@@ -10094,21 +10090,101 @@ async function scaricaChiamateMerck() {
         chiamate = parseMerckChiamate(html);
         // Attenzione: l'HTML piatto di un portale Lightning può contenere "password" nei
         // suoi script — il controllo sembraLogin vale solo se NON è stata trovata tabella.
-        if (chiamate.length === 0 && r2.sembraLogin) {
-          mostraToast('🔐 Sessione scaduta: apro il portale per l\'accesso.', 'warning');
-          merckApriLogin();
-          return;
-        }
+        if (chiamate.length === 0 && r2.sembraLogin) return { ok: true, sembraLogin: true, chiamate: [], html };
       }
     } else {
       console.warn('[Merck] scaricaRender:', r2.errore);
     }
   }
-  _merckUltimoHtml = html;
+  return { ok: true, sembraLogin: false, chiamate, html };
+}
+
+async function scaricaChiamateMerck() {
+  const url = merckUrlSalvato();
+  if (!url) { mostraToast('Imposta prima l\'URL del portale Merck nelle Impostazioni.', 'warning'); showSection('impostazioni'); return; }
+  if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
+  mostraToast('⏳ Scaricamento dal portale Merck…', 'info');
+
+  const r = await merckScaricaElencoGrezzo(url);
+  if (!r.ok) { mostraToast('❌ ' + r.errore, 'danger'); return; }
+  if (r.sembraLogin) {
+    mostraToast('🔐 Sessione del portale scaduta o assente: apro il portale per l\'accesso.', 'warning');
+    merckApriLogin();
+    return;
+  }
+  _merckUltimoHtml = r.html;
 
   // Deduplica: solo le chiamate NON già presenti arrivano all'anteprima
-  const nuove = chiamate.filter(c => !_merckChiamataGiaPresente(c.numeroChiamata));
-  await _merckApriPreview(chiamate, nuove);
+  const nuove = r.chiamate.filter(c => !_merckChiamataGiaPresente(c.numeroChiamata));
+  await _merckApriPreview(r.chiamate, nuove);
+}
+
+// Correzione in blocco dei numeri WO salvati male dal bug "Work Order Type" scambiato per il
+// numero (vedi _MERCK_MAPPA_HEADER): riscarica l'elenco e, per ogni appuntamento/intervento di
+// origine Merck, ritrova la chiamata corrispondente tramite matricola+data (campi mai toccati
+// dal bug) e corregge SOLO il numero — non crea né elimina mai appuntamenti, per evitare
+// duplicati con quelli già importati.
+async function merckCorreggiNumeriChiamata() {
+  const url = merckUrlSalvato();
+  if (!url) { mostraToast('Imposta prima l\'URL del portale Merck nelle Impostazioni.', 'warning'); showSection('impostazioni'); return; }
+  if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
+  if (!confirm('Riscarica l\'elenco dal portale Merck e corregge il numero WO sugli appuntamenti/interventi già importati che risultano sbagliati (es. salvato come "Preventive Maintenance" invece del vero numero).\n\nNon vengono creati né cancellati appuntamenti: solo il numero viene corretto dove serve.\n\nProcedere?')) return;
+
+  mostraToast('⏳ Scaricamento elenco dal portale per il confronto…', 'info');
+  const r = await merckScaricaElencoGrezzo(url);
+  if (!r.ok) { mostraToast('❌ ' + r.errore, 'danger'); return; }
+  if (r.sembraLogin) {
+    mostraToast('🔐 Sessione del portale scaduta o assente: apro il portale per l\'accesso.', 'warning');
+    merckApriLogin();
+    return;
+  }
+  if (!r.chiamate.length) { mostraToast('Nessuna chiamata leggibile nella pagina scaricata.', 'warning'); return; }
+
+  // Indicizza le chiamate fresche per matricola+data: entrambi i campi erano estratti
+  // correttamente anche prima del fix, quindi sono una chiave affidabile per ritrovare la
+  // chiamata giusta indipendentemente da cosa fosse finito (per errore) nel numero.
+  const chiave = (matricola, data) => _merckNormNum(matricola) + '|' + String(data || '').trim();
+  const perChiave = new Map();
+  const ambigue = new Set();
+  r.chiamate.forEach(c => {
+    if (!c.matricola || !c.data) return;
+    const k = chiave(c.matricola, c.data);
+    if (perChiave.has(k)) ambigue.add(k); else perChiave.set(k, c);
+  });
+
+  let corrette = 0, interventiCorretti = 0, daControllareAMano = 0, senzaMatch = 0;
+  (DB.appuntamenti || []).filter(a => a.origine === 'merck').forEach(a => {
+    (a.strumenti || []).forEach(s => {
+      if (!s.seriale || !a.data) return;
+      const k = chiave(s.seriale, a.data);
+      if (ambigue.has(k)) { daControllareAMano++; return; }
+      const fresca = perChiave.get(k);
+      if (!fresca || !fresca.numeroChiamata) { senzaMatch++; return; }
+      if (fresca.numeroChiamata === s.numeroChiamata) return; // già corretto
+
+      const vecchio = s.numeroChiamata;
+      s.numeroChiamata = fresca.numeroChiamata;
+      if (a.chiamata === vecchio) a.chiamata = fresca.numeroChiamata;
+      corrette++;
+
+      // L'intervento collegato viene corretto SOLO se il suo numero coincide ancora col
+      // valore vecchio (sbagliato): se il tecnico lo ha poi modificato a mano, non lo si tocca.
+      if (s.interventoId) {
+        const iv = DB.interventi.find(x => x.id === s.interventoId);
+        if (iv && iv.numero === vecchio) { iv.numero = fresca.numeroChiamata; interventiCorretti++; }
+        else if (iv && iv.numero !== fresca.numeroChiamata) daControllareAMano++;
+      }
+    });
+  });
+
+  if (!corrette) {
+    mostraToast(`Nessuna correzione necessaria.${senzaMatch ? ` ${senzaMatch} chiamata/e non trovate nell'elenco scaricato (forse chiuse/filtrate).` : ''}${daControllareAMano ? ` ${daControllareAMano} da controllare a mano (ambigue o intervento già modificato).` : ''}`, 'info');
+    return;
+  }
+  DB.save();
+  DB.auditLog('update', 'appuntamento', null, `Corretti ${corrette} numeri WO da portale Merck (${interventiCorretti} interventi collegati aggiornati)`);
+  renderAll();
+  mostraToast(`✅ Corretti ${corrette} numeri WO (${interventiCorretti} interventi collegati aggiornati).${daControllareAMano ? `\n⚠️ ${daControllareAMano} da controllare a mano (ambigue, o intervento già modificato manualmente).` : ''}${senzaMatch ? `\n${senzaMatch} non trovate nell'elenco attuale del portale.` : ''}`, 'success');
 }
 
 function merckSalvaHtmlDebug() {
