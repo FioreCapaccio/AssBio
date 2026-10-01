@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('merckPortal', {
   salvaCredenziali: (user, password) => ipcRenderer.invoke('merck:salvaCredenziali', user, password),
   credenzialiInfo: () => ipcRenderer.invoke('merck:credenzialiInfo'),
   salvaHtml: (html) => ipcRenderer.invoke('merck:salvaHtml', html),
+  salvaHtmlLogin: () => ipcRenderer.invoke('merck:salvaHtmlLogin'),
   // Diagnostica live del tentativo di autofill in corso (vedi merckInviaDiagnostica in
   // main.js): solo testo descrittivo dell'esito, mai credenziali. Permette di vedere cosa
   // succede durante il login anche nel pacchetto di produzione, senza DevTools.

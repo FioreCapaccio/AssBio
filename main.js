@@ -364,6 +364,24 @@ const MERCK_CHECK_SCRIPT = `(() => {
   return { haPassword: !!coppia, userVuoto: !!(coppia && coppia.u && !coppia.u.value), passVuota: !!(coppia && !coppia.p.value) };
 })()`;
 
+// Serializza documento + iframe + TUTTI gli shadow DOM aperti in testo leggibile, per
+// calibrare l'autofill su un portale reale. Un semplice outerHTML del documento non basta:
+// per costruzione il contenuto degli shadow DOM non viene mai incluso nella serializzazione
+// del documento che li ospita (è l'intero scopo dello shadow DOM) — su un form come
+// c-community-login-form, che non ha ALCUN input nel documento piatto, un outerHTML normale
+// risulterebbe un guscio vuoto. Le password visibili vengono mascherate prima di esportare.
+const MERCK_SERIALIZZA_RADICI = `(() => {
+  ${MERCK_COLLEZIONA_RADICI}
+  return radici.map((root) => {
+    const titolo = root === document ? 'DOCUMENTO PRINCIPALE'
+      : (root.host ? 'SHADOW ROOT di <' + root.host.tagName.toLowerCase() + (root.host.id ? ('#' + root.host.id) : '') + '>'
+      : 'ALTRO (iframe)');
+    const contenitore = root.body || root;
+    [...contenitore.querySelectorAll('input[type=password]')].forEach(p => { if (p.value) p.setAttribute('value', '••••••••'); });
+    return '=== ' + titolo + ' ===\\n' + (contenitore.innerHTML || '');
+  }).join('\\n\\n');
+})()`;
+
 // Inoltra alla finestra principale (card "Portale Merck" in Impostazioni) l'ultimo esito
 // del tentativo di autofill, così l'utente vede DAL VIVO cosa sta succedendo durante il
 // login — senza questo, nel pacchetto di produzione (niente Toggle Developer Tools) un
@@ -548,6 +566,7 @@ async function merckProvaAutofill(win, credenziali) {
       })()`, true).catch(() => null);
       if (chkStato && !chkStato.checked && chkStato.x > 0) clickReale(win, chkStato.x, chkStato.y);
       esito.spuntaMessa = true;
+      esito.spuntaStato = chkStato ? chkStato.checked : null;
     }
     // Bottone: si preme solo quando il portale lo ha abilitato, con coordinate fresche —
     // MAI nello stesso tick in cui è stata messa la spunta (il click può spostare il layout).
@@ -561,7 +580,15 @@ async function merckProvaAutofill(win, credenziali) {
       esito.submitted = true;
       merckInviaDiagnostica('Form inviato. Se il portale risponde ancora "credenziali non valide", il problema è lato portale (password scaduta/da aggiornare, account bloccato dopo tentativi precedenti) — prova ad accedere scrivendo a mano in questa finestra per avere un messaggio d\'errore diretto dal portale.', win);
     } else if (stato.btn && stato.btn.disabled) {
-      merckInviaDiagnostica('Pulsante di accesso trovato ma ancora disabilitato dal portale (manca qualche condizione, es. la spunta dei termini) — riprovo al prossimo tentativo.', win);
+      // Diagnostica precisa sul PERCHÉ resta disabilitato, invece di un generico "manca
+      // qualche condizione": se non c'è alcuna checkbox e il bottone resta comunque
+      // disabilitato, la condizione mancante è qualcos'altro (altro campo obbligatorio,
+      // validazione formato, ecc.) — serve vedere la pagina reale per saperlo di sicuro.
+      const dettaglioSpunta = !stato.chk
+        ? 'nessuna casella di spunta individuata sulla pagina: la condizione che blocca il pulsante è probabilmente un\'altra (altro campo obbligatorio? formato non valido?) — usa "Salva HTML pagina di login" per farmela vedere'
+        : (esito.spuntaStato === true ? 'la casella di spunta risulta selezionata, ma il pulsante resta comunque disabilitato: il portale richiede probabilmente anche altro'
+           : 'la casella di spunta è stata individuata ma NON risulta selezionata dopo il tentativo — il click automatico potrebbe non "agganciare" su questo portale: usa "Salva HTML pagina di login" per farmela vedere');
+      merckInviaDiagnostica(`Pulsante di accesso trovato ma ancora disabilitato dal portale — ${dettaglioSpunta}.`, win);
     } else if (stato.btn && !credenzialiVerificate) {
       merckInviaDiagnostica('Invio evitato: i campi non contengono le credenziali attese nemmeno dopo il tentativo di correzione. Prova a scrivere le credenziali a mano in questa finestra.', win);
     }
@@ -756,6 +783,22 @@ function registraCanaliMerck() {
     const res = await dialog.showSaveDialog({ title: "Salva HTML del portale (per calibrare l'estrazione)", defaultPath: 'merck-pagina.html' });
     if (res.canceled || !res.filePath) return { ok: false };
     await fsp.writeFile(res.filePath, html, 'utf8');
+    return { ok: true, percorso: res.filePath };
+  });
+
+  // Debug: cattura la pagina di login ATTUALMENTE aperta (documento + iframe + shadow DOM,
+  // vedi MERCK_SERIALIZZA_RADICI) — serve a vedere la VERA struttura del form quando
+  // l'autofill si blocca (es. bottone sempre disabilitato) senza dover indovinare. Le
+  // password digitate vengono mascherate prima del salvataggio.
+  ipcMain.handle('merck:salvaHtmlLogin', async () => {
+    if (!merckFinestraLogin || merckFinestraLogin.isDestroyed()) {
+      return { ok: false, errore: 'Nessuna finestra di login del portale è aperta al momento.' };
+    }
+    const testo = await merckFinestraLogin.webContents.executeJavaScript(MERCK_SERIALIZZA_RADICI, true).catch((e) => null);
+    if (!testo) return { ok: false, errore: 'Impossibile leggere il contenuto della pagina.' };
+    const res = await dialog.showSaveDialog({ title: "Salva struttura pagina di login (per calibrare l'autofill)", defaultPath: 'merck-login.html' });
+    if (res.canceled || !res.filePath) return { ok: false };
+    await fsp.writeFile(res.filePath, testo, 'utf8');
     return { ok: true, percorso: res.filePath };
   });
 }
