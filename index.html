@@ -2302,6 +2302,10 @@
             <option value="Annullato">Annullato</option>
           </select>
         </div>
+        <div class="form-group">
+          <label for="app_tipo">Tipo intervento</label>
+          <input type="text" id="app_tipo" placeholder="es. Manutenzione preventiva (dal portale Merck: Work Order Type)">
+        </div>
       </div>
       <div class="form-group">
         <label>Strumenti coinvolti</label>
@@ -3715,7 +3719,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.27 • 1 ott 2026';
+const APP_VERSION = '2.10.28 • 1 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -9335,6 +9339,7 @@ function openAppuntamentoModal(id = null) {
     document.getElementById('app_ora_inizio').value = a.oraInizio || '';
     document.getElementById('app_ora_fine').value = a.oraFine || '';
     document.getElementById('app_stato').value = a.stato || 'Programmato';
+    document.getElementById('app_tipo').value = a.tipo || '';
     document.getElementById('app_problema').value = a.problema || '';
     document.getElementById('app_note').value = a.note || '';
     document.getElementById('app_tecnico').value = a.tecnico || '';
@@ -9352,6 +9357,7 @@ function openAppuntamentoModal(id = null) {
     document.getElementById('app_ora_inizio').value = '';
     document.getElementById('app_ora_fine').value = '';
     document.getElementById('app_stato').value = 'Programmato';
+    document.getElementById('app_tipo').value = '';
     document.getElementById('app_problema').value = '';
     document.getElementById('app_note').value = '';
     document.getElementById('app_tecnico').value = '';
@@ -9594,6 +9600,7 @@ function _persistiAppuntamentoDaForm() {
     oraInizio: document.getElementById('app_ora_inizio').value,
     oraFine: document.getElementById('app_ora_fine').value,
     stato: document.getElementById('app_stato').value || 'Programmato',
+    tipo: document.getElementById('app_tipo').value.trim(),
     strumenti: strumentiSelezionati,
     // Campi singolari mantenuti in scrittura per compatibilità con eventuali integrazioni
     // esterne che leggessero ancora questo formato: rispecchiano il primo strumento scelto.
@@ -9952,6 +9959,7 @@ const _MERCK_MAPPA_HEADER = [
   // numero): senza l'esclusione "type" vinceva questa colonna perché precede "Work Order
   // Number" nella tabella, e il numero vero restava scartato (!c[campo] blocca il secondo match).
   ['numeroChiamata', /^(?!.*\btype\b).*(?:chiamata|work\s*order|\bwo\b|case\s*(?:number|n)|ticket|n\.?\s?°?\s*intervento)/i],
+  ['tipoChiamata', /work\s*order\s*type|\btipo\b|\btype\b/i],
   ['data', /data|date|apertura|inizio\s*prev|programm/i],
   ['matricola', /matricola|seriale|s\s*\/?\s*n\.?|serial/i],
   ['strumento', /strumento|modello|apparecchio|instrument|model/i],
@@ -10048,6 +10056,7 @@ function merckDaTabella(tabella) {
 function _merckNormalizza(c, testoRiga) {
   const rec = {
     numeroChiamata: String(c.numeroChiamata || '').trim(),
+    tipoChiamata: String(c.tipoChiamata || '').trim(),
     data: _merckParsaData(c.data),
     matricola: String(c.matricola || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim(),
     strumento: String(c.strumento || '').trim(),
@@ -10128,7 +10137,7 @@ async function merckCorreggiNumeriChiamata() {
   const url = merckUrlSalvato();
   if (!url) { mostraToast('Imposta prima l\'URL del portale Merck nelle Impostazioni.', 'warning'); showSection('impostazioni'); return; }
   if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
-  if (!confirm('Riscarica l\'elenco dal portale Merck e corregge il numero WO sugli appuntamenti/interventi già importati che risultano sbagliati (es. salvato come "Preventive Maintenance" invece del vero numero).\n\nNon vengono creati né cancellati appuntamenti: solo il numero viene corretto dove serve.\n\nProcedere?')) return;
+  if (!confirm('Riscarica l\'elenco dal portale Merck e corregge il numero WO sugli appuntamenti/interventi già importati che risultano sbagliati (es. salvato come "Preventive Maintenance" invece del vero numero), e completa il campo "Tipo intervento" dove manca.\n\nNon vengono creati né cancellati appuntamenti: solo i campi vengono corretti/completati dove serve.\n\nProcedere?')) return;
 
   mostraToast('⏳ Scaricamento elenco dal portale per il confronto…', 'info');
   const r = await merckScaricaElencoGrezzo(url);
@@ -10152,15 +10161,20 @@ async function merckCorreggiNumeriChiamata() {
     if (perChiave.has(k)) ambigue.add(k); else perChiave.set(k, c);
   });
 
-  let corrette = 0, interventiCorretti = 0, daControllareAMano = 0, senzaMatch = 0;
+  let corrette = 0, interventiCorretti = 0, tipiCompletati = 0, daControllareAMano = 0, senzaMatch = 0;
   (DB.appuntamenti || []).filter(a => a.origine === 'merck').forEach(a => {
     (a.strumenti || []).forEach(s => {
       if (!s.seriale || !a.data) return;
       const k = chiave(s.seriale, a.data);
       if (ambigue.has(k)) { daControllareAMano++; return; }
       const fresca = perChiave.get(k);
-      if (!fresca || !fresca.numeroChiamata) { senzaMatch++; return; }
-      if (fresca.numeroChiamata === s.numeroChiamata) return; // già corretto
+      if (!fresca) { senzaMatch++; return; }
+
+      // Completa il "Tipo intervento" (Work Order Type) dove manca, indipendentemente dal
+      // fatto che il numero WO fosse già corretto o meno.
+      if (!a.tipo && fresca.tipoChiamata) { a.tipo = fresca.tipoChiamata; tipiCompletati++; }
+
+      if (fresca.numeroChiamata === s.numeroChiamata) return; // numero già corretto
 
       const vecchio = s.numeroChiamata;
       s.numeroChiamata = fresca.numeroChiamata;
@@ -10177,14 +10191,14 @@ async function merckCorreggiNumeriChiamata() {
     });
   });
 
-  if (!corrette) {
+  if (!corrette && !tipiCompletati) {
     mostraToast(`Nessuna correzione necessaria.${senzaMatch ? ` ${senzaMatch} chiamata/e non trovate nell'elenco scaricato (forse chiuse/filtrate).` : ''}${daControllareAMano ? ` ${daControllareAMano} da controllare a mano (ambigue o intervento già modificato).` : ''}`, 'info');
     return;
   }
   DB.save();
-  DB.auditLog('update', 'appuntamento', null, `Corretti ${corrette} numeri WO da portale Merck (${interventiCorretti} interventi collegati aggiornati)`);
+  DB.auditLog('update', 'appuntamento', null, `Corretti ${corrette} numeri WO e completati ${tipiCompletati} tipi intervento da portale Merck (${interventiCorretti} interventi collegati aggiornati)`);
   renderAll();
-  mostraToast(`✅ Corretti ${corrette} numeri WO (${interventiCorretti} interventi collegati aggiornati).${daControllareAMano ? `\n⚠️ ${daControllareAMano} da controllare a mano (ambigue, o intervento già modificato manualmente).` : ''}${senzaMatch ? `\n${senzaMatch} non trovate nell'elenco attuale del portale.` : ''}`, 'success');
+  mostraToast(`✅ Corretti ${corrette} numeri WO, completati ${tipiCompletati} tipi intervento (${interventiCorretti} interventi collegati aggiornati).${daControllareAMano ? `\n⚠️ ${daControllareAMano} da controllare a mano (ambigue, o intervento già modificato manualmente).` : ''}${senzaMatch ? `\n${senzaMatch} non trovate nell'elenco attuale del portale.` : ''}`, 'success');
 }
 
 function merckSalvaHtmlDebug() {
@@ -10236,6 +10250,7 @@ function _merckRenderPreview() {
       <td><strong>${escHtml(c.numeroChiamata || '—')}</strong></td>
       <td>${cl ? escHtml(trunc(cl.ragione, 32)) : '<span style="color:#f59e0b;font-weight:600;">⚠️ da assegnare</span>'}</td>
       <td>${escHtml(c.strumento || '—')}${c.matricola ? '<br><small style="font-family:monospace;color:var(--text-muted);">' + escHtml(c.matricola) + '</small>' : ''}</td>
+      <td>${escHtml(c.tipoChiamata || '—')}</td>
       <td title="${escAttr(c.problema || '')}">${escHtml(trunc(c.problema || '—', 70))}</td>
       <td>${c.statoPortale ? escHtml(trunc(c.statoPortale, 20)) + ` → ${_merckMappaStato(c.statoPortale)}` : _merckMappaStato(c.statoPortale)}</td>
     </tr>`;
@@ -10245,7 +10260,7 @@ function _merckRenderPreview() {
     <div style="max-height:48vh; overflow:auto;">
       <table class="table" style="width:100%; border-collapse:collapse; font-size:0.85rem;">
         <thead><tr style="background:var(--surface2); border-bottom:2px solid var(--border);">
-          <th style="width:30px;"></th><th>Data</th><th>Chiamata/WO</th><th>Cliente</th><th>Strumento</th><th>Problema</th><th>Stato → in app</th>
+          <th style="width:30px;"></th><th>Data</th><th>Chiamata/WO</th><th>Cliente</th><th>Strumento</th><th>Tipo</th><th>Problema</th><th>Stato → in app</th>
         </tr></thead>
         <tbody>${righe}</tbody>
       </table>
@@ -10294,6 +10309,7 @@ async function confermaCreaAppuntamentiMerck() {
       data: c.data || today(),
       oraInizio: '', oraFine: '',
       stato: _merckMappaStato(c.statoPortale),
+      tipo: c.tipoChiamata || '',
       strumenti: [{ modello: c.strumento || '', seriale: c.matricola || '', numeroChiamata: c.numeroChiamata || '', interventoId: null }],
       strumento: c.strumento || '',
       seriale: c.matricola || '',
@@ -10349,6 +10365,33 @@ function vaiOggiCalendarioAppuntamenti() {
 function apriNuovoAppuntamentoData(dataStr) {
   _calAppDataPreselezionata = dataStr;
   openAppuntamentoModal();
+}
+
+// Iconcina per il tipo di intervento (appuntamento.tipo o intervento.tipo, testo libero: sia
+// quello scritto a mano sia quello scaricato dal portale Merck) accanto al nome cliente nei
+// calendari: dà una visione immediata del genere di visita senza dover aprire la scheda.
+// "Manutenzione correttiva"/"riparazione" è classificata come Guasto (si interviene perché
+// qualcosa si è rotto), "Manutenzione preventiva" come Manutenzione — se non va bene, dillo e
+// si corregge la regola.
+const _TIPO_INTERVENTO_ICONE = {
+  disinstallazione: { icona: '➖', titolo: 'Disinstallazione' },
+  guasto:           { icona: '⚠️', titolo: 'Guasto' },
+  manutenzione:     { icona: '🔧', titolo: 'Manutenzione' },
+  installazione:    { icona: '🆕', titolo: 'Installazione' },
+  altro:            { icona: '🔹', titolo: 'Altro' }
+};
+function _classificaTipoIntervento(tipo) {
+  const t = String(tipo || '').toLowerCase();
+  if (!t) return null;
+  if (/de-?\s*install|disinstall|uninstall|rimozione|dismission/.test(t)) return 'disinstallazione';
+  if (/guasto|correttiv|corrective|riparazion|rottura|malfunzion|breakdown|repair/.test(t)) return 'guasto';
+  if (/manuten|preventiv|revision|calibraz/.test(t)) return 'manutenzione';
+  if (/install/.test(t)) return 'installazione';
+  return 'altro';
+}
+function _iconaTipoIntervento(tipo) {
+  const cat = _classificaTipoIntervento(tipo);
+  return cat ? _TIPO_INTERVENTO_ICONE[cat] : null;
 }
 
 function renderCalendarioAppuntamenti() {
@@ -10412,8 +10455,9 @@ function renderCalendarioAppuntamenti() {
       // (verde acqua), riconoscibile a colpo d'occhio rispetto a quelli creati a mano.
       const colore = a.origine === 'merck' ? '#0d9488' : (statoColori[a.stato] || '#64748b');
       const label = cl ? cl.ragione : 'N/D';
-      const titolo = (a.origine === 'merck' ? '📥 Da portale Merck · ' : '') + label + (a.stato ? ' · ' + a.stato : '');
-      return `<div class="cal-event" style="background:${colore};" title="${escAttr(titolo)}" onclick="event.stopPropagation(); openAppuntamentoModal(${a.id})">${escHtml(label)}</div>`;
+      const iconaTipo = _iconaTipoIntervento(a.tipo);
+      const titolo = (a.origine === 'merck' ? '📥 Da portale Merck · ' : '') + (iconaTipo ? iconaTipo.titolo + ' · ' : '') + label + (a.stato ? ' · ' + a.stato : '');
+      return `<div class="cal-event" style="background:${colore};" title="${escAttr(titolo)}" onclick="event.stopPropagation(); openAppuntamentoModal(${a.id})">${iconaTipo ? iconaTipo.icona + ' ' : ''}${escHtml(label)}</div>`;
     }).join('');
     const altriHtml = eventiGiorno.length > maxMostrati ? `<div class="cal-more">+${eventiGiorno.length - maxMostrati} altri</div>` : '';
 
@@ -11260,7 +11304,9 @@ function renderCalendarioInterventi() {
       const cl = DB.clienti.find(c => c.id === iv.clienteId);
       const colore = statoColori[iv.stato] || '#64748b';
       const label = (iv.numero ? iv.numero + ' — ' : '') + (cl ? cl.ragione : 'N/D');
-      return `<div class="cal-event" style="background:${colore};" title="${escAttr(label)}" onclick="event.stopPropagation(); viewIntervento(${iv.id})">${escHtml(label)}</div>`;
+      const iconaTipo = _iconaTipoIntervento(iv.tipo);
+      const titolo = (iconaTipo ? iconaTipo.titolo + ' · ' : '') + label;
+      return `<div class="cal-event" style="background:${colore};" title="${escAttr(titolo)}" onclick="event.stopPropagation(); viewIntervento(${iv.id})">${iconaTipo ? iconaTipo.icona + ' ' : ''}${escHtml(label)}</div>`;
     }).join('');
     const altriHtml = eventiGiorno.length > maxMostrati ? `<div class="cal-more">+${eventiGiorno.length - maxMostrati} altri</div>` : '';
 
