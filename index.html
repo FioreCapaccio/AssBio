@@ -3363,7 +3363,10 @@
           </div>
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
             <input type="text" id="merckUser" placeholder="User del portale (email)" autocomplete="off" style="flex:1; min-width:160px; padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
-            <input type="password" id="merckPassword" placeholder="Password (aggiorna ogni 3 mesi)" autocomplete="new-password" style="flex:1; min-width:160px; padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
+            <div style="position:relative; flex:1; min-width:160px;">
+              <input type="password" id="merckPassword" placeholder="Password (aggiorna ogni 3 mesi)" autocomplete="new-password" style="width:100%; padding:8px 34px 8px 10px; border-radius:8px; border:1px solid var(--border); box-sizing:border-box;">
+              <button type="button" onclick="_merckTogglePassword(this)" title="Mostra/nascondi la password digitata" style="position:absolute; right:4px; top:50%; transform:translateY(-50%); background:none; border:none; cursor:pointer; font-size:1rem; padding:4px;">👁️</button>
+            </div>
             <button class="btn btn-ghost" onclick="merckSalvaCredenziali()">💾 Salva credenziali</button>
           </div>
           <div id="merckStato" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:8px;">—</div>
@@ -3711,7 +3714,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.22 • 1 ott 2026';
+const APP_VERSION = '2.10.23 • 1 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -9844,6 +9847,16 @@ function merckSalvaUrl() {
   else localStorage.removeItem('ivd_merck_url');
   mostraToast(v ? '✅ URL del portale salvato.' : 'URL del portale rimosso.', 'success');
   merckAggiornaStatoCard();
+}
+
+// Mostra/nasconde in chiaro la password appena digitata nel campo — solo per rileggerla
+// prima di salvarla (es. per escludere un errore di battitura): non tocca mai la password
+// già salvata e cifrata, che il renderer non vede mai.
+function _merckTogglePassword(btn) {
+  const campo = document.getElementById('merckPassword');
+  if (!campo) return;
+  campo.type = campo.type === 'password' ? 'text' : 'password';
+  btn.textContent = campo.type === 'password' ? '👁️' : '🙈';
 }
 
 async function merckSalvaCredenziali() {
