@@ -3714,7 +3714,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.25 • 1 ott 2026';
+const APP_VERSION = '2.10.26 • 1 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -9947,7 +9947,10 @@ function _merckParsaData(testo) {
 // su un'analisi per riga con regex (WO + data). Da calibrare col bottone "Salva HTML"
 // se il portale ha una struttura diversa.
 const _MERCK_MAPPA_HEADER = [
-  ['numeroChiamata', /chiamata|work\s*order|\bwo\b|case\s*(number|n)|ticket|n\.?\s?°?\s*intervento/i],
+  // Esclude esplicitamente colonne come "Work Order Type" (il tipo di intervento, non il
+  // numero): senza l'esclusione "type" vinceva questa colonna perché precede "Work Order
+  // Number" nella tabella, e il numero vero restava scartato (!c[campo] blocca il secondo match).
+  ['numeroChiamata', /^(?!.*\btype\b).*(?:chiamata|work\s*order|\bwo\b|case\s*(?:number|n)|ticket|n\.?\s?°?\s*intervento)/i],
   ['data', /data|date|apertura|inizio\s*prev|programm/i],
   ['matricola', /matricola|seriale|s\s*\/?\s*n\.?|serial/i],
   ['strumento', /strumento|modello|apparecchio|instrument|model/i],
