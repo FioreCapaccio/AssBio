@@ -3714,7 +3714,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.24 • 1 ott 2026';
+const APP_VERSION = '2.10.25 • 1 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -10137,7 +10137,7 @@ async function _merckApriPreview(chiamate, nuove) {
           ? `Trovate ${chiamate.length} chiamata/e sul portale, ma sono <strong>tutte già presenti</strong> nell'app.<br>Niente da importare.`
           : `Nessuna chiamata riconoscibile nella pagina scaricata.<br>Potrebbe non esserci nessuna chiamata aperta, oppure la pagina va calibrata per il portale.`}</p>
         <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
-          ${chiamate.length ? '' : '<button class="btn btn-ghost btn-sm" onclick="merckSalvaHtmlDebug()">🐛 Salva HTML per analisi</button>'}
+          <button class="btn btn-ghost btn-sm" onclick="merckSalvaHtmlDebug()">🐛 Salva HTML per analisi</button>
           <button class="btn btn-ghost btn-sm" onclick="closeModal('modalMerckChiamate')">Chiudi</button>
         </div>
       </div>`;
