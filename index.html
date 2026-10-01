@@ -3719,7 +3719,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.28 • 1 ott 2026';
+const APP_VERSION = '2.10.29 • 1 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -10451,9 +10451,12 @@ function renderCalendarioAppuntamenti() {
     const maxMostrati = 3;
     const eventiHtml = eventiGiorno.slice(0, maxMostrati).map(a => {
       const cl = DB.clienti.find(c => c.id === a.clienteId);
-      // Gli appuntamenti importati dal portale Merck hanno una colorazione dedicata
-      // (verde acqua), riconoscibile a colpo d'occhio rispetto a quelli creati a mano.
-      const colore = a.origine === 'merck' ? '#0d9488' : (statoColori[a.stato] || '#64748b');
+      // Solo i Merck ancora "Programmato" hanno una colorazione dedicata (viola): quelli già
+      // confermati/completati/annullati si riconoscono dal colore del proprio stato come gli
+      // altri, altrimenti risulterebbero sempre dello stesso colore indipendentemente da cosa
+      // ne è stato fatto. (Nei giorni fuori mese, a inizio/fine griglia, qualunque colore
+      // appare più slavato per via del dimming CSS di quelle celle — non è un colore diverso.)
+      const colore = (a.origine === 'merck' && a.stato === 'Programmato') ? '#9333ea' : (statoColori[a.stato] || '#64748b');
       const label = cl ? cl.ragione : 'N/D';
       const iconaTipo = _iconaTipoIntervento(a.tipo);
       const titolo = (a.origine === 'merck' ? '📥 Da portale Merck · ' : '') + (iconaTipo ? iconaTipo.titolo + ' · ' : '') + label + (a.stato ? ' · ' + a.stato : '');
