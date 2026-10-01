@@ -453,9 +453,38 @@ async function merckProvaAutofill(win, credenziali) {
         console.log('[Merck] verifica inserimento: user OK, pass OK (lunghezze ' + credenziali.user.length + '/' + credenziali.password.length + ')');
       }
     }
-    // Spunta obbligatoria con click reale del mouse (solo se non già spuntata)
+    // Spunta obbligatoria. Le checkbox Salesforce (pattern SLDS) hanno l'input nativo
+    // visivamente nascosto con una label stilizzata sopra: un click alle coordinate
+    // dell'input non aggancia nulla (verificato sul portale reale — la spunta restava
+    // false e Sign In disabilitato). Strategia robusta in ordine: 1) focus + SPAZIO
+    // (eventi tastiera fidati come un utente); 2) click reale sulla LABEL associata
+    // (grande e visibile); 3) click reale sull'input.
     if (stato.chk && !stato.chk.checked) {
-      clickReale(win, stato.chk.x, stato.chk.y);
+      await win.webContents.executeJavaScript(`(() => {
+        ${MERCK_COLLEZIONA_RADICI}
+        const c = cercaCoppia();
+        if (!c) return false;
+        const tutte = [...c.root.querySelectorAll('input[type=checkbox]')];
+        const chk = tutte.find(x => /agre|accept|terms|privacy|consen|condiz|gdpr/i.test((x.id || '') + ' ' + (x.name || ''))) || tutte[0];
+        if (chk && !chk.checked) { chk.focus(); return true; }
+        return false;
+      })()`, true).catch(() => null);
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'space' });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'space' });
+      await new Promise(r => setTimeout(r, 400));
+      const chkStato = await win.webContents.executeJavaScript(`(() => {
+        ${MERCK_COLLEZIONA_RADICI}
+        const c = cercaCoppia();
+        if (!c) return null;
+        const tutte = [...c.root.querySelectorAll('input[type=checkbox]')];
+        const chk = tutte.find(x => /agre|accept|terms|privacy|consen|condiz|gdpr/i.test((x.id || '') + ' ' + (x.name || ''))) || tutte[0];
+        if (!chk) return null;
+        const label = c.root.querySelector('label[for="' + chk.id + '"]') || chk.closest('label');
+        const el = label || chk;
+        const r = el.getBoundingClientRect();
+        return { checked: chk.checked, x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      })()`, true).catch(() => null);
+      if (chkStato && !chkStato.checked && chkStato.x > 0) clickReale(win, chkStato.x, chkStato.y);
       esito.spuntaMessa = true;
     }
     // Bottone: si preme solo quando il portale lo ha abilitato, con coordinate fresche —
