@@ -88,10 +88,10 @@ async function scriviFileAtomico(filePath, content) {
 function conTimeout(promessa, ms, operazione) {
   return Promise.race([
     promessa,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout (${Math.round(ms / 1000)}s) sull'operazione "${operazione}" — la cartella archivio non risponde (iCloud/sync o disco non disponibile?)`)), ms))
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout (${Math.round(ms / 1000)}s) sull'operazione "${operazione}" — la cartella archivio non ha risposto in tempo (disco esterno/di rete lento, cartella sincronizzata — iCloud/Dropbox/OneDrive — ancora in corso, o semplicemente disco occupato)`)), ms))
   ]);
 }
-const OP_TIMEOUT_MS = 20000;
+const OP_TIMEOUT_MS = 30000;
 
 function leggiFileConTimeout(p) { return conTimeout(p, OP_TIMEOUT_MS, 'lettura'); }
 function scriviConTimeout(p) { return conTimeout(p, OP_TIMEOUT_MS, 'scrittura'); }
@@ -364,6 +364,22 @@ const MERCK_CHECK_SCRIPT = `(() => {
   return { haPassword: !!coppia, userVuoto: !!(coppia && coppia.u && !coppia.u.value), passVuota: !!(coppia && !coppia.p.value) };
 })()`;
 
+// Inoltra alla finestra principale (card "Portale Merck" in Impostazioni) l'ultimo esito
+// del tentativo di autofill, così l'utente vede DAL VIVO cosa sta succedendo durante il
+// login — senza questo, nel pacchetto di produzione (niente Toggle Developer Tools) un
+// fallimento restava visibile solo nei log della console del processo main, che l'utente
+// non può aprire. Fondamentale per capire SE il problema è "non trovo i campi di login su
+// questo portale" (selettori da adattare) oppure "campi trovati ma le credenziali salvate
+// vengono rifiutate" (password da aggiornare, account bloccato dal portale, ecc.).
+function merckInviaDiagnostica(messaggio) {
+  console.log('[Merck]', messaggio);
+  try {
+    if (finestraPrincipale && !finestraPrincipale.isDestroyed()) {
+      finestraPrincipale.webContents.send('merck:diagnostica', messaggio);
+    }
+  } catch { /* finestra principale non pronta: solo log console */ }
+}
+
 // Click REALE (eventi mouse fidati) alle coordinate viewport indicate: i componenti
 // Salesforce Lightning (LWC) reagiscono come a un vero utente.
 function clickReale(win, x, y) {
@@ -409,7 +425,10 @@ async function merckProvaAutofill(win, credenziali) {
         btn: btnR
       };
     })()`, true).catch(() => null);
-    if (!stato || !stato.trovato) return esito;
+    if (!stato || !stato.trovato) {
+      merckInviaDiagnostica('Nessun campo di login individuato in questo tentativo (documento, iframe e shadow DOM analizzati) — se la pagina è già quella giusta, il portale potrebbe avere una struttura diversa da quella prevista.');
+      return esito;
+    }
     esito.trovato = true;
 
     // Username e password: focus + inserimento come digitazione reale (eventi fidati),
@@ -448,7 +467,7 @@ async function merckProvaAutofill(win, credenziali) {
       esito.userOk = lettura.userValore === credenziali.user;
       esito.passOk = lettura.passValore === credenziali.password;
       if (!esito.userOk || !esito.passOk) {
-        console.warn(`[Merck] verifica inserimento: user=${esito.userOk ? 'OK' : 'MISMATCH(len ' + (lettura.userValore || '').length + ' vs ' + credenziali.user.length + ')'} pass=${esito.passOk ? 'OK' : (lettura.passValore === '' ? 'VUOTA' : 'MISMATCH(len ' + (lettura.passValore || '').length + ' vs ' + credenziali.password.length + ')')}`);
+        merckInviaDiagnostica(`Verifica inserimento — user: ${esito.userOk ? 'OK' : 'non corrisponde (letti ' + (lettura.userValore || '').length + ' caratteri, attesi ' + credenziali.user.length + ')'} · password: ${esito.passOk ? 'OK' : (lettura.passValore === '' ? 'campo rimasto vuoto' : 'non corrisponde (letti ' + (lettura.passValore || '').length + ' caratteri, attesi ' + credenziali.password.length + ')')}. Provo a correggere…`);
         // Un solo tentativo di correzione: pulisce DAVVERO il campo (select-all + canc)
         // prima di reinserire, invece di limitarsi a scrivere sopra un valore parziale o
         // duplicato — altrimenti la correzione stessa poteva introdurre un secondo doppione.
@@ -472,10 +491,10 @@ async function merckProvaAutofill(win, credenziali) {
         if (ricontrollo) {
           esito.userOk = ricontrollo.userValore === credenziali.user;
           esito.passOk = ricontrollo.passValore === credenziali.password;
-          console.warn(`[Merck] dopo correzione: user=${esito.userOk ? 'OK' : 'ANCORA MISMATCH'} pass=${esito.passOk ? 'OK' : 'ANCORA MISMATCH'}`);
+          merckInviaDiagnostica(`Dopo il tentativo di correzione — user: ${esito.userOk ? 'OK' : 'ancora sbagliato'} · password: ${esito.passOk ? 'OK' : 'ancora sbagliata'}.` + (!esito.userOk || !esito.passOk ? ' Il portale potrebbe bloccare la digitazione automatica su questo campo: prova a scrivere le credenziali a mano in questa finestra.' : ''));
         }
       } else {
-        console.log('[Merck] verifica inserimento: user OK, pass OK (lunghezze ' + credenziali.user.length + '/' + credenziali.password.length + ')');
+        merckInviaDiagnostica(`Credenziali inserite correttamente (user e password verificati carattere per carattere).`);
       }
     }
     // Spunta obbligatoria. Le checkbox Salesforce (pattern SLDS) hanno l'input nativo
@@ -522,8 +541,11 @@ async function merckProvaAutofill(win, credenziali) {
     if (stato.btn && !stato.btn.disabled && !esito.spuntaMessa && credenzialiVerificate) {
       clickReale(win, stato.btn.x, stato.btn.y);
       esito.submitted = true;
+      merckInviaDiagnostica('Form inviato. Se il portale risponde ancora "credenziali non valide", il problema è lato portale (password scaduta/da aggiornare, account bloccato dopo tentativi precedenti) — prova ad accedere scrivendo a mano in questa finestra per avere un messaggio d\'errore diretto dal portale.');
+    } else if (stato.btn && stato.btn.disabled) {
+      merckInviaDiagnostica('Pulsante di accesso trovato ma ancora disabilitato dal portale (manca qualche condizione, es. la spunta dei termini) — riprovo al prossimo tentativo.');
     } else if (stato.btn && !credenzialiVerificate) {
-      console.warn('[Merck] Submit evitato: i campi non contengono le credenziali attese dopo il tentativo di correzione.');
+      merckInviaDiagnostica('Invio evitato: i campi non contengono le credenziali attese nemmeno dopo il tentativo di correzione. Prova a scrivere le credenziali a mano in questa finestra.');
     }
   } catch { /* finestra distrutta o pagina in transizione: tick successivo */ }
   return esito;
@@ -761,6 +783,12 @@ function installaMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// Riferimento alla finestra principale: serve a inoltrarle in tempo reale la diagnostica
+// dei tentativi di autofill del portale Merck (vedi merckInviaDiagnostica), così l'utente la
+// vede nella card "Portale Merck" delle Impostazioni senza dover aprire i DevTools — che
+// nel menu di produzione non ci sono.
+let finestraPrincipale = null;
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
@@ -785,8 +813,10 @@ function createWindow() {
     show: false
   });
 
+  finestraPrincipale = win;
   win.once('ready-to-show', () => win.show());
   win.loadFile('index.html');
+  win.once('closed', () => { finestraPrincipale = null; });
 }
 
 // Hardening applicato a OGNI webContents dell'app (finestra principale, finestre di

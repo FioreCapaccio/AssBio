@@ -3372,6 +3372,7 @@
             <button class="btn btn-ghost" onclick="scaricaChiamateMerck()">⬇️ Scarica chiamate</button>
             <button class="btn btn-ghost" onclick="merckLogout()" title="Cancella i cookie di sessione del portale">🚪 Dimentica sessione</button>
           </div>
+          <div id="merckDiagnostica" style="display:none; margin-top:10px; padding:8px 10px; border-radius:8px; background:var(--surface2); font-size:0.8rem; color:var(--text-muted); border-left:3px solid var(--accent);"></div>
         </div>
 
         <!-- EXPORT TUTTO -->
@@ -3709,7 +3710,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.19 • 1 ott 2026';
+const APP_VERSION = '2.10.20 • 1 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -3992,7 +3993,7 @@ const DB = {
             const salvatoIlCache = parseInt(localStorage.getItem('ivd_saved_at') || '0', 10);
             const salvatoIlCartella = meta.salvato_il ? Date.parse(meta.salvato_il) : 0;
             if (salvatoIlCache && salvatoIlCartella && salvatoIlCache - salvatoIlCartella > 60000 && !sessionStorage.getItem('ivd_confidenza_cartella_ok')) {
-                const usaCache = confirm(`⚠️ ATTENZIONE\n\nI dati locali di questa macchina sono più RECENTI dell'archivio su cartella:\n\n· cartella: ${fmtDate(dataLocaleDa(meta.salvato_il))} ${String(new Date(meta.salvato_il)).slice(16,21)}\n· dati locali: ${fmtDate(dataLocaleDa(new Date(salvatoIlCache).toISOString()))} ${String(new Date(salvatoIlCache)).slice(16,21)}\n\nQuesto capita quando la scrittura sulla cartella è fallita (iCloud/sync non raggiungibile).\n\nOK = usa i dati locali più recenti (consigliato — gli appuntamenti e le modifiche fatte nella sessione precedente non vengono persi)\nAnnulla = usa i dati della cartella (le modifiche successive all'ultimo salvataggio riuscito andranno perdute)`);
+                const usaCache = confirm(`⚠️ ATTENZIONE\n\nI dati locali di questa macchina sono più RECENTI dell'archivio su cartella:\n\n· cartella: ${fmtDate(dataLocaleDa(meta.salvato_il))} ${String(new Date(meta.salvato_il)).slice(16,21)}\n· dati locali: ${fmtDate(dataLocaleDa(new Date(salvatoIlCache).toISOString()))} ${String(new Date(salvatoIlCache)).slice(16,21)}\n\nQuesto capita quando la scrittura sulla cartella è fallita (disco lento/occupato, cartella sincronizzata non raggiungibile, o simili).\n\nOK = usa i dati locali più recenti (consigliato — gli appuntamenti e le modifiche fatte nella sessione precedente non vengono persi)\nAnnulla = usa i dati della cartella (le modifiche successive all'ultimo salvataggio riuscito andranno perdute)`);
                 if (usaCache) {
                     this._usaCachePiuRecente(meta.salvato_il);
                 }
@@ -4007,7 +4008,7 @@ const DB = {
             // appena torna raggiungibile.
             this._archivioBloccato = true;
             console.warn("⚠️ Cartella archivio non raggiungibile all'avvio: si continua con la cache locale (salvataggi in retry automatico).");
-            setTimeout(() => mostraToast('⚠️ Cartella archivio non raggiungibile all\'avvio (iCloud/sync o disco?).\nI dati sono caricati dalla cache locale: i salvataggi verranno riprovati automaticamente.', 'warning'), 1500);
+            setTimeout(() => mostraToast('⚠️ Cartella archivio non raggiungibile all\'avvio (disco lento/occupato o non disponibile).\nI dati sono caricati dalla cache locale: i salvataggi verranno riprovati automaticamente.', 'warning'), 1500);
             _finalizzaCaricamento();
         } else if (dexieDB) {
             // Cartella vuota (primo avvio dopo l'upgrade, o archivio spostato/eliminato):
@@ -4272,7 +4273,7 @@ const DB = {
         if (this._archivioBloccato) return;
         this._archivioBloccato = true;
         try {
-            mostraToast('⚠️ ATTENZIONE: la cartella archivio non risponde (iCloud/sync o disco non disponibile?).\nI dati sono al sicuro nella cache locale, ma NON vengono scritti su disco.\nVerranno riprovati automaticamente ogni 30 secondi.', 'warning');
+            mostraToast('⚠️ ATTENZIONE: la cartella archivio non risponde (disco lento/occupato o non disponibile).\nI dati sono al sicuro nella cache locale, ma NON vengono scritti su disco.\nVerranno riprovati automaticamente ogni 30 secondi.', 'warning');
         } catch (e) {}
     },
 
@@ -9860,12 +9861,34 @@ async function merckSalvaCredenziali() {
   merckAggiornaStatoCard();
 }
 
+// Mostra dal vivo, nella card "Portale Merck", cosa sta facendo il tentativo di autofill in
+// corso (main.js lo inoltra via merck:diagnostica — vedi merckInviaDiagnostica). Senza
+// questo, nel pacchetto di produzione (niente DevTools) un login fallito non dava alcun
+// indizio su COSA non avesse funzionato. Registrato una sola volta.
+let _merckDiagnosticaRegistrata = false;
+function _merckAttivaDiagnostica() {
+  if (_merckDiagnosticaRegistrata || !window.merckPortal || typeof window.merckPortal.onDiagnostica !== 'function') return;
+  _merckDiagnosticaRegistrata = true;
+  window.merckPortal.onDiagnostica((messaggio) => {
+    const el = document.getElementById('merckDiagnostica');
+    if (!el) return;
+    el.style.display = '';
+    el.innerHTML = `🔎 <strong>${fmtOraAdesso()}</strong> — ${escHtml(messaggio)}`;
+  });
+}
+function fmtOraAdesso() {
+  return new Date().toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
 async function merckApriLogin() {
   const url = merckUrlSalvato();
   if (!url) { mostraToast('Imposta prima l\'URL del portale Merck.', 'warning'); return; }
   if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
+  _merckAttivaDiagnostica();
+  const diagEl = document.getElementById('merckDiagnostica');
+  if (diagEl) { diagEl.style.display = 'none'; diagEl.textContent = ''; }
   const res = await window.merckPortal.login(url).catch(e => ({ ok: false, errore: e.message || String(e) }));
-  if (res.ok) mostraToast('Accedi al portale nella finestra aperta (con credenziali salvate il form viene compilato da solo): la sessione resterà attiva.', 'info');
+  if (res.ok) mostraToast('Accedi al portale nella finestra aperta (con credenziali salvate il form viene compilato da solo): la sessione resterà attiva. Segui gli aggiornamenti qui sotto nella card.', 'info');
   else mostraToast('❌ ' + (res.errore || 'Impossibile aprire il portale'), 'danger');
 }
 
