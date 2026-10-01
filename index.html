@@ -9960,6 +9960,10 @@ function parseMerckChiamate(html) {
 
   // Abbinamento cliente: seriale (priorità, match esatto > sottostringa), poi il nome
   // cliente riportato dal portale. Senza abbinamento l'appuntamento nasce "da assegnare".
+  return merckAbbinaClienti(chiamate);
+}
+
+function merckAbbinaClienti(chiamate) {
   chiamate.forEach(c => {
     if (c.matricola) {
       const t = trovaClienteDaSeriale(c.matricola);
@@ -9975,8 +9979,28 @@ function parseMerckChiamate(html) {
       if (cl) c.clienteId = cl.id;
     }
   });
-
   return chiamate;
+}
+
+// Conversione diretta della tabella estratta DALLA PAGINA RENDERIZZATA (portali SPA come
+// Salesforce/ServiceMax): righe già strutturate {intestazioni, righe[][]} → oggetti mappati
+// con gli stessi criteri dell'HTML. Aggira il limite dell'HTML piatto, che per queste
+// pagine è un guscio vuoto senza i dati.
+function merckDaTabella(tabella) {
+  if (!tabella || !Array.isArray(tabella.righe) || !tabella.righe.length) return [];
+  const head = tabella.intestazioni || [];
+  const mapping = head.map(testo => {
+    for (const [campo, re] of _MERCK_MAPPA_HEADER) if (re.test(testo)) return campo;
+    return null;
+  });
+  const chiamate = [];
+  for (const celle of tabella.righe) {
+    const c = {};
+    celle.forEach((testo, i) => { const campo = mapping[i]; if (campo && testo && !c[campo]) c[campo] = testo; });
+    const rec = _merckNormalizza(c, celle.join(' '));
+    if (rec) chiamate.push(rec);
+  }
+  return merckAbbinaClienti(chiamate);
 }
 
 function _merckNormalizza(c, testoRiga) {
@@ -10015,15 +10039,26 @@ async function scaricaChiamateMerck() {
   let chiamate = parseMerckChiamate(res.html);
   let html = res.html;
 
-  // Portale SPA (es. Salesforce): il fetch restituisce la shell senza dati →
-  // secondo tentativo con rendering completo (finestra nascosta + login automatico).
+  // Portale SPA (es. Salesforce/ServiceMax): il fetch restituisce la shell senza dati →
+  // secondo tentativo con rendering completo (finestra nascosta + login automatico), da cui
+  // la tabella elenco viene estratta direttamente dal DOM renderizzato (shadow DOM incluso).
   if (chiamate.length === 0) {
     mostraToast('Nella pagina non ci sono tabelle riconoscibili: provo il rendering completo (portale JavaScript)…', 'info');
     const r2 = await window.merckPortal.scaricaRender(url).catch(e => ({ ok: false, errore: e.message || String(e) }));
     if (r2.ok) {
       html = r2.html || '';
-      if (r2.sembraLogin) { mostraToast('🔐 Sessione scaduta: apro il portale per l\'accesso.', 'warning'); merckApriLogin(); return; }
-      chiamate = parseMerckChiamate(html);
+      if (r2.tabella && r2.tabella.righe && r2.tabella.righe.length) {
+        chiamate = merckDaTabella(r2.tabella);
+      } else {
+        chiamate = parseMerckChiamate(html);
+        // Attenzione: l'HTML piatto di un portale Lightning può contenere "password" nei
+        // suoi script — il controllo sembraLogin vale solo se NON è stata trovata tabella.
+        if (chiamate.length === 0 && r2.sembraLogin) {
+          mostraToast('🔐 Sessione scaduta: apro il portale per l\'accesso.', 'warning');
+          merckApriLogin();
+          return;
+        }
+      }
     } else {
       console.warn('[Merck] scaricaRender:', r2.errore);
     }

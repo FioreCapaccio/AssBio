@@ -302,15 +302,25 @@ function paginaDiLogin(html) {
   return haPassword && indiziLogin;
 }
 
-// Credenziali salvate: decifrate SOLO qui nel main, mai inviate al renderer
+// Credenziali salvate: decifrate SOLO qui nel main, mai inviate al renderer.
+// Pulizia anti copia-incolla: accapo/invii a capo e caratteri zero-width in coda
+// (tipici quando la password viene incollata da una mail/password manager) rendono
+// le credenziali "sbagliate" sul portale pur sembrando identiche. Si tolgono \r\n\t
+// ai bordi e gli zero-width ovunque; gli SPAZI restano toccati solo ai bordi estremi
+// tramite trim (una password con spazi interni resta intatta).
 function merckCredenziali() {
   const cfg = leggiConfig();
   if (!cfg.merck || !cfg.merck.passEnc) return null;
   if (!safeStorage.isEncryptionAvailable()) return null;
   try {
+    const passwordPulita = safeStorage.decryptString(Buffer.from(cfg.merck.passEnc, 'base64'))
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/^[\r\n\t]+/, '')
+      .replace(/[\r\n\t]+$/, '')
+      .trim();
     return {
-      user: cfg.merck.user || '',
-      password: safeStorage.decryptString(Buffer.from(cfg.merck.passEnc, 'base64')),
+      user: String(cfg.merck.user || '').trim(),
+      password: passwordPulita,
       aggiornataIl: cfg.merck.aggiornataIl || null
     };
   } catch { return null; }
@@ -374,7 +384,7 @@ function clickReale(win, x, y) {
 // quando il portale lo ha abilitato, con coordinate fresche (tick successivo al click sulla
 // spunta: il click può far comparire messaggi e spostare il layout).
 async function merckProvaAutofill(win, credenziali) {
-  const esito = { trovato: false, userInserito: false, passInserita: false, spuntaMessa: false, submitted: false };
+  const esito = { trovato: false, userInserito: false, passInserita: false, spuntaMessa: false, submitted: false, userOk: null, passOk: null };
   if (!win || win.isDestroyed()) return esito;
   try {
     const stato = await win.webContents.executeJavaScript(`(() => {
@@ -415,6 +425,34 @@ async function merckProvaAutofill(win, credenziali) {
       win.webContents.insertText(credenziali.password);
       esito.passInserita = true;
     }
+    // VERIFICA di quanto realmente scritto nei campi (log mascherato: solo esiti
+    // booleani e lunghezze, MAI il contenuto). Se l'inserimento non è atterrato
+    // fedelmente, il mismatch lo mostra subito invece che far fallire il login
+    // con "credenziali sbagliate" inspiegabili.
+    const lettura = await win.webContents.executeJavaScript(`(() => {
+      ${MERCK_COLLEZIONA_RADICI}
+      const c = cercaCoppia();
+      if (!c) return null;
+      return { userValore: c.u ? c.u.value : null, passValore: c.p ? c.p.value : null };
+    })()`, true).catch(() => null);
+    if (lettura) {
+      esito.userOk = lettura.userValore === credenziali.user;
+      esito.passOk = lettura.passValore === credenziali.password;
+      if (!esito.userOk || !esito.passOk) {
+        console.warn(`[Merck] verifica inserimento: user=${esito.userOk ? 'OK' : 'MISMATCH(len ' + (lettura.userValore || '').length + ' vs ' + credenziali.user.length + ')'} pass=${esito.passOk ? 'OK' : (lettura.passValore === '' ? 'VUOTA' : 'MISMATCH(len ' + (lettura.passValore || '').length + ' vs ' + credenziali.password.length + ')')}`);
+        // Un solo tentativo di correzione: pulizia del campo e nuovo inserimento
+        if (!esito.userOk && lettura.userValore === '') {
+          await win.webContents.executeJavaScript(`(() => { ${MERCK_COLLEZIONA_RADICI} const c = cercaCoppia(); if (c && c.u) c.u.focus(); return true; })()`, true).catch(() => null);
+          win.webContents.insertText(credenziali.user);
+        }
+        if (!esito.passOk && lettura.passValore === '') {
+          await win.webContents.executeJavaScript(`(() => { ${MERCK_COLLEZIONA_RADICI} const c = cercaCoppia(); if (c && c.p) c.p.focus(); return true; })()`, true).catch(() => null);
+          win.webContents.insertText(credenziali.password);
+        }
+      } else {
+        console.log('[Merck] verifica inserimento: user OK, pass OK (lunghezze ' + credenziali.user.length + '/' + credenziali.password.length + ')');
+      }
+    }
     // Spunta obbligatoria con click reale del mouse (solo se non già spuntata)
     if (stato.chk && !stato.chk.checked) {
       clickReale(win, stato.chk.x, stato.chk.y);
@@ -430,10 +468,41 @@ async function merckProvaAutofill(win, credenziali) {
   return esito;
 }
 
+// Estrazione della tabella elenco chiamate DALLA PAGINA RENDERIZZATA (portali SPA come
+// Salesforce Lightning/ServiceMax): attraversa documento + iframe + shadow DOM, trova la
+// tabella con più righe e restituisce { intestazioni, righe }. L'HTML piatto di queste
+// pagine è un guscio vuoto: senza questo passaggio il parser non vedrebbe nulla.
+const MERCK_ESTRAI_TABELLA_SCRIPT = `(() => {
+  ${MERCK_COLLEZIONA_RADICI}
+  const estrai = (tab) => {
+    const righe = [...tab.querySelectorAll('tr')];
+    if (righe.length < 2) return null;
+    const intestazioni = [...righe[0].querySelectorAll('th,td')].map(c => c.textContent.replace(/\\s+/g, ' ').trim());
+    if (intestazioni.filter(Boolean).length < 2) return null;
+    const righeOut = [];
+    for (const tr of righe.slice(1)) {
+      const celle = [...tr.querySelectorAll('td,th')].map(c => c.textContent.replace(/\\s+/g, ' ').trim());
+      if (celle.join('').length < 3) continue;
+      righeOut.push(celle);
+    }
+    return righeOut.length ? { intestazioni, righe: righeOut } : null;
+  };
+  let migliore = null;
+  for (const root of radici) {
+    [...root.querySelectorAll('table')].forEach(t => {
+      const e = estrai(t);
+      if (e && (!migliore || e.righe.length > migliore.righe.length)) migliore = e;
+    });
+  }
+  return migliore;
+})()`;
+
 // Scaricamento via finestra nascosta con rendering completo: serve per i portali
 // "SPA" (es. Salesforce Lightning) dove il semplice fetch restituisce la shell
 // senza dati. Se la pagina caricata è quella di login e ci sono credenziali
 // salvate, compila e invia il form, poi attende la navigazione post-login.
+// L'estrazione della tabella viene ritentata: dopo il login Lightning impiega
+// qualche secondo a caricare l'elenco dati.
 async function merckScaricaRenderizzato(url) {
   const credenziali = merckCredenziali();
   return await new Promise((resolve) => {
@@ -473,13 +542,21 @@ async function merckScaricaRenderizzato(url) {
           if (inviato) await new Promise(r => setTimeout(r, 10000)); // attesa navigazione post-login
         }
         await new Promise(r => setTimeout(r, 3000)); // finestra di grazia per il rendering SPA
+        // Estrazione della tabella elenco con re-tentativi: Lightning carica i dati
+        // della lista qualche secondo dopo il rendering della pagina.
+        let tabella = null;
+        for (let tent = 0; tent < 3 && !tabella; tent++) {
+          if (tent) await new Promise(r => setTimeout(r, 6000));
+          if (!win || win.isDestroyed()) return;
+          tabella = await win.webContents.executeJavaScript(MERCK_ESTRAI_TABELLA_SCRIPT, true).catch(() => null);
+        }
         const html = await win.webContents.executeJavaScript('document.documentElement.outerHTML');
-        concludi({ ok: true, html });
+        concludi({ ok: true, html, tabella });
       } catch (e) {
         concludi({ ok: false, errore: e.message || String(e) });
       }
     });
-    setTimeout(() => concludi({ ok: false, errore: 'Timeout caricamento pagina portale (45s)' }), 45000);
+    setTimeout(() => concludi({ ok: false, errore: 'Timeout caricamento pagina portale (75s)' }), 75000);
   });
 }
 
