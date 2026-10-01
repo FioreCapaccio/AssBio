@@ -3723,7 +3723,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.30 • 1 ott 2026';
+const APP_VERSION = '2.10.31 • 1 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -10195,7 +10195,7 @@ async function merckCorreggiNumeriChiamata() {
     if (perChiave.has(k)) ambigue.add(k); else perChiave.set(k, c);
   });
 
-  let corrette = 0, interventiCorretti = 0, tipiCompletati = 0, clientiCollegati = 0, daControllareAMano = 0, senzaMatch = 0;
+  let corrette = 0, interventiCorretti = 0, tipiCompletati = 0, strumentiCompletati = 0, clientiCollegati = 0, daControllareAMano = 0, senzaMatch = 0;
   const idGiaSegnalati = new Set();
   const senzaClienteDaCreare = [];
   (DB.appuntamenti || []).filter(a => a.origine === 'merck').forEach(a => {
@@ -10209,6 +10209,14 @@ async function merckCorreggiNumeriChiamata() {
       // Completa il "Tipo intervento" (Work Order Type) dove manca, indipendentemente dal
       // fatto che il numero WO fosse già corretto o meno.
       if (!a.tipo && fresca.tipoChiamata) { a.tipo = fresca.tipoChiamata; tipiCompletati++; }
+
+      // Completa lo strumento ("Product Name") dove manca: le chiamate importate prima che
+      // questa colonna fosse riconosciuta sono rimaste con lo strumento vuoto.
+      if (!s.modello && fresca.strumento) {
+        s.modello = fresca.strumento;
+        if (!a.strumento) a.strumento = fresca.strumento;
+        strumentiCompletati++;
+      }
 
       // Ritenta anche l'abbinamento cliente: prima di questo fix "Account Name" (il
       // distributore) veniva confuso con "Location Name" (il vero cliente/sede), quindi
@@ -10251,14 +10259,14 @@ async function merckCorreggiNumeriChiamata() {
     });
   });
 
-  if (!corrette && !tipiCompletati && !clientiCollegati && !senzaClienteDaCreare.length) {
+  if (!corrette && !tipiCompletati && !strumentiCompletati && !clientiCollegati && !senzaClienteDaCreare.length) {
     mostraToast(`Nessuna correzione necessaria.${senzaMatch ? ` ${senzaMatch} chiamata/e non trovate nell'elenco scaricato (forse chiuse/filtrate).` : ''}${daControllareAMano ? ` ${daControllareAMano} da controllare a mano (ambigue o intervento già modificato).` : ''}`, 'info');
     return;
   }
   DB.save();
-  DB.auditLog('update', 'appuntamento', null, `Corretti ${corrette} numeri WO, completati ${tipiCompletati} tipi intervento e ricollegati ${clientiCollegati} clienti da portale Merck (${interventiCorretti} interventi collegati aggiornati)`);
+  DB.auditLog('update', 'appuntamento', null, `Corretti ${corrette} numeri WO, completati ${tipiCompletati} tipi intervento, ${strumentiCompletati} strumenti e ricollegati ${clientiCollegati} clienti da portale Merck (${interventiCorretti} interventi collegati aggiornati)`);
   renderAll();
-  mostraToast(`✅ Corretti ${corrette} numeri WO, completati ${tipiCompletati} tipi intervento, ricollegati ${clientiCollegati} clienti (${interventiCorretti} interventi collegati aggiornati).${daControllareAMano ? `\n⚠️ ${daControllareAMano} da controllare a mano (ambigue, o intervento già modificato manualmente).` : ''}${senzaMatch ? `\n${senzaMatch} non trovate nell'elenco attuale del portale.` : ''}`, 'success');
+  mostraToast(`✅ Corretti ${corrette} numeri WO, completati ${tipiCompletati} tipi intervento, ${strumentiCompletati} strumenti, ricollegati ${clientiCollegati} clienti (${interventiCorretti} interventi collegati aggiornati).${daControllareAMano ? `\n⚠️ ${daControllareAMano} da controllare a mano (ambigue, o intervento già modificato manualmente).` : ''}${senzaMatch ? `\n${senzaMatch} non trovate nell'elenco attuale del portale.` : ''}`, 'success');
 
   if (senzaClienteDaCreare.length) {
     const nomi = [...new Set(senzaClienteDaCreare.map(a => a.clienteDatiPortale.ragione))];
