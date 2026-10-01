@@ -281,8 +281,30 @@ const MERCK_PARTITION = 'persist:merck';
 let merckFinestraLogin = null;
 let merckAutofillTimer = null;
 
+// User-Agent standard da Chrome desktop invece di quello di default di Electron (che
+// contiene la sottostringa "Electron/x.y.z"): molti portali aziendali — Salesforce
+// Experience Cloud/Community incluso — hanno politiche di sicurezza che riconoscono e
+// bloccano i login da client non standard/automatizzati, mostrando un generico "login
+// attempt failed" anche con credenziali corrette (confermato: le stesse credenziali
+// funzionano da un browser normale ma falliscono anche digitandole a mano dentro questa
+// sessione). Usa la versione di Chromium realmente imbarcata in questa build di Electron,
+// così resta coerente con le funzionalità JS effettivamente disponibili.
+function merckUserAgentStandard() {
+  const chromeVer = process.versions.chrome || '130.0.0.0';
+  const piattaforma = process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7'
+    : process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64'
+    : 'X11; Linux x86_64';
+  return `Mozilla/5.0 (${piattaforma}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVer} Safari/537.36`;
+}
+
+let _merckUaImpostato = false;
 function merckSessione() {
-  return session.fromPartition(MERCK_PARTITION);
+  const ses = session.fromPartition(MERCK_PARTITION);
+  if (!_merckUaImpostato) {
+    ses.setUserAgent(merckUserAgentStandard());
+    _merckUaImpostato = true;
+  }
+  return ses;
 }
 
 function validaUrlPortale(urlGrezzo) {
