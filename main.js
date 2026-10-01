@@ -279,7 +279,6 @@ function registraCanaliArchivio() {
 // ============================================================================
 const MERCK_PARTITION = 'persist:merck';
 let merckFinestraLogin = null;
-let merckHostCorrente = null;
 let merckAutofillTimer = null;
 
 function merckSessione() {
@@ -415,16 +414,26 @@ async function merckProvaAutofill(win, credenziali) {
 
     // Username e password: focus + inserimento come digitazione reale (eventi fidati),
     // solo se il campo è vuoto — mai sopra il testo dell'utente.
+    // BUG FIX ("credenziali errate" anche quando corrette): insertText() ritorna una
+    // Promise che va ATTESA — prima non lo era, quindi il controllo subito dopo (poche
+    // righe sotto) a volte leggeva il campo PRIMA che il testo fosse davvero atterrato nel
+    // DOM. Il controllo trovava allora un valore vuoto o parziale e lo "correggeva" con un
+    // secondo insertText: se nel frattempo il primo inserimento era comunque arrivato, il
+    // campo finiva per contenere il valore scritto DUE VOLTE di seguito (es. la password
+    // concatenata con se stessa) — credenziali visivamente "giuste" ma di fatto sbagliate
+    // ad ogni tentativo di login. Atteso anche un istante dopo l'inserimento per dare al
+    // componente Lightning il tempo di assestarsi prima di rileggere il valore.
     if (stato.user && stato.user.visibile && stato.user.valore === '') {
       await win.webContents.executeJavaScript(`(() => { ${MERCK_COLLEZIONA_RADICI} const c = cercaCoppia(); if (c && c.u) c.u.focus(); return true; })()`, true).catch(() => null);
-      win.webContents.insertText(credenziali.user);
+      await win.webContents.insertText(credenziali.user);
       esito.userInserito = true;
     }
     if (stato.pass && stato.pass.visibile && stato.pass.valore === '') {
       await win.webContents.executeJavaScript(`(() => { ${MERCK_COLLEZIONA_RADICI} const c = cercaCoppia(); if (c && c.p) c.p.focus(); return true; })()`, true).catch(() => null);
-      win.webContents.insertText(credenziali.password);
+      await win.webContents.insertText(credenziali.password);
       esito.passInserita = true;
     }
+    await new Promise(r => setTimeout(r, 200));
     // VERIFICA di quanto realmente scritto nei campi (log mascherato: solo esiti
     // booleani e lunghezze, MAI il contenuto). Se l'inserimento non è atterrato
     // fedelmente, il mismatch lo mostra subito invece che far fallire il login
@@ -440,14 +449,30 @@ async function merckProvaAutofill(win, credenziali) {
       esito.passOk = lettura.passValore === credenziali.password;
       if (!esito.userOk || !esito.passOk) {
         console.warn(`[Merck] verifica inserimento: user=${esito.userOk ? 'OK' : 'MISMATCH(len ' + (lettura.userValore || '').length + ' vs ' + credenziali.user.length + ')'} pass=${esito.passOk ? 'OK' : (lettura.passValore === '' ? 'VUOTA' : 'MISMATCH(len ' + (lettura.passValore || '').length + ' vs ' + credenziali.password.length + ')')}`);
-        // Un solo tentativo di correzione: pulizia del campo e nuovo inserimento
-        if (!esito.userOk && lettura.userValore === '') {
+        // Un solo tentativo di correzione: pulisce DAVVERO il campo (select-all + canc)
+        // prima di reinserire, invece di limitarsi a scrivere sopra un valore parziale o
+        // duplicato — altrimenti la correzione stessa poteva introdurre un secondo doppione.
+        if (!esito.userOk) {
           await win.webContents.executeJavaScript(`(() => { ${MERCK_COLLEZIONA_RADICI} const c = cercaCoppia(); if (c && c.u) c.u.focus(); return true; })()`, true).catch(() => null);
-          win.webContents.insertText(credenziali.user);
+          win.webContents.selectAll();
+          await win.webContents.insertText(credenziali.user);
         }
-        if (!esito.passOk && lettura.passValore === '') {
+        if (!esito.passOk) {
           await win.webContents.executeJavaScript(`(() => { ${MERCK_COLLEZIONA_RADICI} const c = cercaCoppia(); if (c && c.p) c.p.focus(); return true; })()`, true).catch(() => null);
-          win.webContents.insertText(credenziali.password);
+          win.webContents.selectAll();
+          await win.webContents.insertText(credenziali.password);
+        }
+        await new Promise(r => setTimeout(r, 200));
+        const ricontrollo = await win.webContents.executeJavaScript(`(() => {
+          ${MERCK_COLLEZIONA_RADICI}
+          const c = cercaCoppia();
+          if (!c) return null;
+          return { userValore: c.u ? c.u.value : null, passValore: c.p ? c.p.value : null };
+        })()`, true).catch(() => null);
+        if (ricontrollo) {
+          esito.userOk = ricontrollo.userValore === credenziali.user;
+          esito.passOk = ricontrollo.passValore === credenziali.password;
+          console.warn(`[Merck] dopo correzione: user=${esito.userOk ? 'OK' : 'ANCORA MISMATCH'} pass=${esito.passOk ? 'OK' : 'ANCORA MISMATCH'}`);
         }
       } else {
         console.log('[Merck] verifica inserimento: user OK, pass OK (lunghezze ' + credenziali.user.length + '/' + credenziali.password.length + ')');
@@ -489,9 +514,16 @@ async function merckProvaAutofill(win, credenziali) {
     }
     // Bottone: si preme solo quando il portale lo ha abilitato, con coordinate fresche —
     // MAI nello stesso tick in cui è stata messa la spunta (il click può spostare il layout).
-    if (stato.btn && !stato.btn.disabled && !esito.spuntaMessa) {
+    // Mai se la verifica sopra (anche dopo il tentativo di correzione) ha accertato che uno
+    // dei due campi NON contiene il valore atteso: inviare comunque sprecherebbe un
+    // tentativo di login — alcuni portali bloccano l'account dopo poche credenziali errate
+    // consecutive, l'ultima cosa che serve è che sia l'app a bruciarle per un bug di autofill.
+    const credenzialiVerificate = esito.userOk !== false && esito.passOk !== false;
+    if (stato.btn && !stato.btn.disabled && !esito.spuntaMessa && credenzialiVerificate) {
       clickReale(win, stato.btn.x, stato.btn.y);
       esito.submitted = true;
+    } else if (stato.btn && !credenzialiVerificate) {
+      console.warn('[Merck] Submit evitato: i campi non contengono le credenziali attese dopo il tentativo di correzione.');
     }
   } catch { /* finestra distrutta o pagina in transizione: tick successivo */ }
   return esito;
@@ -616,7 +648,6 @@ function registraCanaliMerck() {
   ipcMain.handle('merck:login', (event, urlGrezzo) => {
     const url = validaUrlPortale(urlGrezzo);
     if (!url) return { ok: false, errore: 'URL del portale non valido (deve iniziare con https://)' };
-    merckHostCorrente = new URL(url).hostname;
     if (merckFinestraLogin && !merckFinestraLogin.isDestroyed()) { merckFinestraLogin.focus(); return { ok: true }; }
     merckFinestraLogin = new BrowserWindow({
       width: 1180, height: 880, title: 'Accesso al portale Merck', backgroundColor: '#f5f5f7',
@@ -652,7 +683,6 @@ function registraCanaliMerck() {
   ipcMain.handle('merck:scarica', async (event, urlGrezzo) => {
     const url = validaUrlPortale(urlGrezzo);
     if (!url) return { ok: false, errore: 'URL del portale non valido' };
-    merckHostCorrente = new URL(url).hostname;
     try {
       const res = await merckSessione().fetch(url, { redirect: 'follow', bypassCustomProtocolHandlers: true });
       const html = await res.text();
@@ -666,7 +696,6 @@ function registraCanaliMerck() {
   ipcMain.handle('merck:scaricaRender', async (event, urlGrezzo) => {
     const url = validaUrlPortale(urlGrezzo);
     if (!url) return { ok: false, errore: 'URL del portale non valido' };
-    merckHostCorrente = new URL(url).hostname;
     try {
       const res = await merckScaricaRenderizzato(url);
       if (res.ok) res.sembraLogin = paginaDiLogin(res.html);

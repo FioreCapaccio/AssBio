@@ -2,6 +2,8 @@
 node_modules/
 dist_electron/
 dist/
+build-macos-latest/
+build-windows-latest/
 
 # Backup dati utente — non vanno versionati (dati reali dei clienti)
 IVD_Backup_*.json

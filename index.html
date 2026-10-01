@@ -3709,7 +3709,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.18 • 1 ott 2026';
+const APP_VERSION = '2.10.19 • 1 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -9774,10 +9774,11 @@ function renderAppuntamenti() {
       ? `<button class="btn btn-ghost btn-sm btn-icon" onclick="event.stopPropagation(); ${interventiCollegati.length === 1 ? `showSection('interventi'); openInterventoModal(${interventiCollegati[0]})` : `mostraToast('Interventi collegati: ' + ${JSON.stringify(interventiCollegati.length)})`}" title="${interventiCollegati.length === 1 ? 'Apri intervento collegato' : interventiCollegati.length + ' interventi collegati'}">🔧</button>`
       : (a.stato !== 'Annullato' ? `<button class="btn btn-ghost btn-sm btn-icon" onclick="event.stopPropagation(); convertiAppuntamentoInIntervento(${a.id})" title="${interventiCollegati.length ? 'Continua la creazione degli interventi rimanenti' : 'Crea intervento da questo appuntamento'}">➡️</button>` : '');
 
-    return `<tr>
+    return `<tr${a.origine === 'merck' ? ' style="border-left:3px solid #0d9488;background:rgba(13,148,136,0.06);"' : ''}>
       <td>
         <strong style="cursor:pointer; color:var(--text-light);" onclick="openAppuntamentoModal(${a.id})">${fmtDateShort(a.data)}</strong>
         ${orario ? `<div style="font-size:0.78rem;color:var(--text-muted);">${orario}</div>` : ''}
+        ${a.origine === 'merck' ? '<div style="font-size:0.7rem;color:#0d9488;font-weight:600;" title="Importato dal portale Merck">📥 Merck</div>' : ''}
       </td>
       <td>${cl ? `<span style="cursor:pointer;color:var(--text-light);font-weight:500;" onclick="openClienteModal(${cl.id})" title="Apri scheda cliente">${escHtml(trunc(cl.ragione, 40))}</span>` : '<em style="color:var(--text-muted)">N/D</em>'}</td>
       <td title="${escAttr(strumentiTesto)}">${escHtml(trunc(strumentiTesto, 24))}${strumentiList.length > 1 ? ` <span class="tag" style="font-size:0.65rem;">+${strumentiList.length-1}</span>` : ''}</td>
@@ -10110,6 +10111,7 @@ function _merckRenderPreview() {
       <td>${cl ? escHtml(trunc(cl.ragione, 32)) : '<span style="color:#f59e0b;font-weight:600;">⚠️ da assegnare</span>'}</td>
       <td>${escHtml(c.strumento || '—')}${c.matricola ? '<br><small style="font-family:monospace;color:var(--text-muted);">' + escHtml(c.matricola) + '</small>' : ''}</td>
       <td title="${escAttr(c.problema || '')}">${escHtml(trunc(c.problema || '—', 70))}</td>
+      <td>${c.statoPortale ? escHtml(trunc(c.statoPortale, 20)) + ` → ${_merckMappaStato(c.statoPortale)}` : _merckMappaStato(c.statoPortale)}</td>
     </tr>`;
   }).join('');
   body.innerHTML = `
@@ -10117,7 +10119,7 @@ function _merckRenderPreview() {
     <div style="max-height:48vh; overflow:auto;">
       <table class="table" style="width:100%; border-collapse:collapse; font-size:0.85rem;">
         <thead><tr style="background:var(--surface2); border-bottom:2px solid var(--border);">
-          <th style="width:30px;"></th><th>Data</th><th>Chiamata/WO</th><th>Cliente</th><th>Strumento</th><th>Problema</th>
+          <th style="width:30px;"></th><th>Data</th><th>Chiamata/WO</th><th>Cliente</th><th>Strumento</th><th>Problema</th><th>Stato → in app</th>
         </tr></thead>
         <tbody>${righe}</tbody>
       </table>
@@ -10137,6 +10139,18 @@ function _merckAggiornaConteggio() {
   if (btn) btn.textContent = `✅ Crea ${n} appuntament${n === 1 ? 'o' : 'i'}`;
 }
 
+// Lo stato riportato dal portale (es. "Chiusa", "Annullata") non va perso: prima ogni
+// chiamata scaricata diventava sempre un appuntamento "Programmato", anche quando il
+// portale la mostrava già chiusa o annullata (può succedere se la vista da cui si scarica
+// non è filtrata per le sole chiamate davvero aperte).
+function _merckMappaStato(statoPortale) {
+  const s = String(statoPortale || '').toLowerCase();
+  if (/chius|complet|risolt|closed|done|resolved/.test(s)) return 'Completato';
+  if (/annull|cancel/.test(s)) return 'Annullato';
+  if (/confer/.test(s)) return 'Confermato';
+  return 'Programmato';
+}
+
 async function confermaCreaAppuntamentiMerck() {
   const selezionate = _merckChiamate.filter(c => c._selezionata);
   if (!selezionate.length) { mostraToast('Nessuna riga selezionata.', 'warning'); return; }
@@ -10153,7 +10167,7 @@ async function confermaCreaAppuntamentiMerck() {
       clienteId: c.clienteId || null,
       data: c.data || today(),
       oraInizio: '', oraFine: '',
-      stato: 'Programmato',
+      stato: _merckMappaStato(c.statoPortale),
       strumenti: [{ modello: c.strumento || '', seriale: c.matricola || '', numeroChiamata: c.numeroChiamata || '', interventoId: null }],
       strumento: c.strumento || '',
       seriale: c.matricola || '',
@@ -10171,7 +10185,7 @@ async function confermaCreaAppuntamentiMerck() {
   DB.auditLog('create', 'appuntamento', null, `Creati ${creati} appuntamenti da portale Merck${saltate ? ` (${saltate} saltate perché già presenti)` : ''}`);
   closeModal('modalMerckChiamate');
   renderAll();
-  mostraToast(`✅ Creati ${creati} appuntament${creati === 1 ? 'o' : 'i'} da Merck${saltate ? ` — ${saltate} già presenti, saltate` : ''}.\nGli appuntamenti Merck sono evidenziati in verde acqua nel calendario.`, 'success');
+  mostraToast(`✅ Creati ${creati} appuntament${creati === 1 ? 'o' : 'i'} da Merck${saltate ? ` — ${saltate} già presenti, saltate` : ''}.\nGli appuntamenti Merck sono evidenziati in verde acqua sia in lista sia nel calendario.`, 'success');
 }
 
 // ======================== CALENDARIO APPUNTAMENTI ========================
