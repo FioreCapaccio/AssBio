@@ -2269,6 +2269,10 @@
       <button class="modal-close" onclick="closeModal('modalAppuntamento')">✕</button>
     </div>
     <div class="modal-body">
+      <div id="app_cliente_merck_banner" style="display:none; margin-bottom:12px; padding:10px 12px; border-radius:8px; background:rgba(245,158,11,0.1); border-left:3px solid #f59e0b; font-size:0.85rem;">
+        ⚠️ Cliente non presente in archivio — dal portale Merck: <strong id="app_cliente_merck_nome"></strong>
+        <button type="button" class="btn btn-ghost btn-sm" style="margin-left:8px;" onclick="merckCreaClienteDaAppuntamento(editAppuntamentoId)">➕ Crea cliente ora</button>
+      </div>
       <div class="form-grid">
         <div class="form-group" style="position:relative;">
           <label for="app_cliente_search">Cliente <span class="req">*</span></label>
@@ -3719,7 +3723,7 @@
 <script>
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.29 • 1 ott 2026';
+const APP_VERSION = '2.10.30 • 1 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -9331,10 +9335,17 @@ function openAppuntamentoModal(id = null) {
   const esitoWrap = document.getElementById('app_esito_wrap');
   const btnConverti = document.getElementById('btnConvertiAppuntamento');
 
+  const bannerMerck = document.getElementById('app_cliente_merck_banner');
   if (a) {
     document.getElementById('app_cliente').value = a.clienteId || '';
     const clAtt = a.clienteId ? DB.clienti.find(c => c.id === a.clienteId) : null;
     document.getElementById('app_cliente_search').value = clAtt ? clAtt.ragione : '';
+    if (!clAtt && a.clienteDatiPortale?.ragione) {
+      document.getElementById('app_cliente_merck_nome').textContent = a.clienteDatiPortale.ragione;
+      bannerMerck.style.display = '';
+    } else {
+      bannerMerck.style.display = 'none';
+    }
     document.getElementById('app_data').value = a.data || '';
     document.getElementById('app_ora_inizio').value = a.oraInizio || '';
     document.getElementById('app_ora_fine').value = a.oraFine || '';
@@ -9352,6 +9363,7 @@ function openAppuntamentoModal(id = null) {
   } else {
     document.getElementById('app_cliente').value = '';
     document.getElementById('app_cliente_search').value = '';
+    bannerMerck.style.display = 'none';
     document.getElementById('app_data').value = _calAppDataPreselezionata || today();
     _calAppDataPreselezionata = null;
     document.getElementById('app_ora_inizio').value = '';
@@ -9793,7 +9805,13 @@ function renderAppuntamenti() {
         ${orario ? `<div style="font-size:0.78rem;color:var(--text-muted);">${orario}</div>` : ''}
         ${a.origine === 'merck' ? '<div style="font-size:0.7rem;color:#0d9488;font-weight:600;" title="Importato dal portale Merck">📥 Merck</div>' : ''}
       </td>
-      <td>${cl ? `<span style="cursor:pointer;color:var(--text-light);font-weight:500;" onclick="openClienteModal(${cl.id})" title="Apri scheda cliente">${escHtml(trunc(cl.ragione, 40))}</span>` : '<em style="color:var(--text-muted)">N/D</em>'}</td>
+      <td>${cl
+        ? `<span style="cursor:pointer;color:var(--text-light);font-weight:500;" onclick="openClienteModal(${cl.id})" title="Apri scheda cliente">${escHtml(trunc(cl.ragione, 40))}</span>`
+        : (a.clienteDatiPortale?.ragione
+            ? `<span style="color:#f59e0b;font-weight:600;" title="Non presente in archivio — nome letto dal portale Merck">⚠️ ${escHtml(trunc(a.clienteDatiPortale.ragione, 32))}</span>
+               <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:0.68rem;margin-left:4px;" onclick="event.stopPropagation(); merckCreaClienteDaAppuntamento(${a.id})" title="Crea questo cliente in archivio con i dati del portale e collegalo">➕ Crea</button>`
+            : '<em style="color:var(--text-muted)">N/D</em>')
+      }</td>
       <td title="${escAttr(strumentiTesto)}">${escHtml(trunc(strumentiTesto, 24))}${strumentiList.length > 1 ? ` <span class="tag" style="font-size:0.65rem;">+${strumentiList.length-1}</span>` : ''}</td>
       <td title="${escAttr(a.problema||'')}">${escHtml(trunc(a.problema||'—', 40))}</td>
       <td>${escHtml(a.tecnico||'—')}</td>
@@ -9962,11 +9980,23 @@ const _MERCK_MAPPA_HEADER = [
   ['tipoChiamata', /work\s*order\s*type|\btipo\b|\btype\b/i],
   ['data', /data|date|apertura|inizio\s*prev|programm/i],
   ['matricola', /matricola|seriale|s\s*\/?\s*n\.?|serial/i],
-  ['strumento', /strumento|modello|apparecchio|instrument|model/i],
-  ['clientePortale', /cliente|ragione|account|ospedale|laboratorio|societ/i],
+  ['strumento', /strumento|modello|apparecchio|instrument|model|product\s*name/i],
+  // "Location Name" è il vero cliente/sede da visitare (es. l'ospedale); "Account Name" in
+  // questo portale è invece il distributore commerciale (es. "Abbott Srl") — non va confuso
+  // col cliente. "location" precede "account" nell'alternanza SOLO come criterio di priorità
+  // a parità di colonna: la colonna con indice più basso vince comunque (vedi parseMerckChiamate/
+  // merckDaTabella), e "Location Name" nella tabella reale precede "Account Name".
+  ['clientePortale', /location|cliente|ragione|account|ospedale|laboratorio|societ/i],
   ['problema', /descriz|problema|richiesta|guasto|oggetto|subject|anomal/i],
   ['statoPortale', /stato|status/i],
-  ['tecnico', /tecnico|technician|assegnat|ingegnere/i]
+  ['tecnico', /tecnico|technician|assegnat|ingegnere|engineer/i],
+  // Usati per completare la scheda cliente quando viene creata al volo (vedi
+  // merckCreaClienteDaAppuntamento): telefono va controllato PRIMA di referente, altrimenti
+  // "Service Contact Phone #" verrebbe preso dal pattern generico "contact" di referente.
+  ['telefono', /phone|telefono|cellulare/i],
+  ['referente', /contact|referente|contatto/i],
+  ['citta', /\bcity\b|città|\bcitta\b/i],
+  ['indirizzo', /\bstreet\b|indirizzo|\bvia\b/i]
 ];
 
 function parseMerckChiamate(html) {
@@ -10063,7 +10093,11 @@ function _merckNormalizza(c, testoRiga) {
     clientePortale: String(c.clientePortale || '').trim(),
     problema: String(c.problema || '').trim(),
     statoPortale: String(c.statoPortale || '').trim(),
-    tecnico: String(c.tecnico || '').trim()
+    tecnico: String(c.tecnico || '').trim(),
+    telefono: String(c.telefono || '').trim(),
+    referente: String(c.referente || '').trim(),
+    citta: String(c.citta || '').trim(),
+    indirizzo: String(c.indirizzo || '').trim()
   };
   if (!rec.numeroChiamata && testoRiga) {
     const m = testoRiga.match(/\b(?:WO|CH|CALL)\s?[-–]?\s?(\d{3,10})\b/i) || testoRiga.match(/\bWO\s?[-–]?\s?[A-Z0-9]{2,}-?\d{2,}\b/i);
@@ -10137,7 +10171,7 @@ async function merckCorreggiNumeriChiamata() {
   const url = merckUrlSalvato();
   if (!url) { mostraToast('Imposta prima l\'URL del portale Merck nelle Impostazioni.', 'warning'); showSection('impostazioni'); return; }
   if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
-  if (!confirm('Riscarica l\'elenco dal portale Merck e corregge il numero WO sugli appuntamenti/interventi già importati che risultano sbagliati (es. salvato come "Preventive Maintenance" invece del vero numero), e completa il campo "Tipo intervento" dove manca.\n\nNon vengono creati né cancellati appuntamenti: solo i campi vengono corretti/completati dove serve.\n\nProcedere?')) return;
+  if (!confirm('Riscarica l\'elenco dal portale Merck e corregge il numero WO sugli appuntamenti/interventi già importati che risultano sbagliati, completa il "Tipo intervento" dove manca e ritenta l\'abbinamento cliente per le chiamate rimaste "da assegnare".\n\nNon vengono creati né cancellati appuntamenti: solo i campi vengono corretti/completati dove serve.\n\nProcedere?')) return;
 
   mostraToast('⏳ Scaricamento elenco dal portale per il confronto…', 'info');
   const r = await merckScaricaElencoGrezzo(url);
@@ -10161,7 +10195,9 @@ async function merckCorreggiNumeriChiamata() {
     if (perChiave.has(k)) ambigue.add(k); else perChiave.set(k, c);
   });
 
-  let corrette = 0, interventiCorretti = 0, tipiCompletati = 0, daControllareAMano = 0, senzaMatch = 0;
+  let corrette = 0, interventiCorretti = 0, tipiCompletati = 0, clientiCollegati = 0, daControllareAMano = 0, senzaMatch = 0;
+  const idGiaSegnalati = new Set();
+  const senzaClienteDaCreare = [];
   (DB.appuntamenti || []).filter(a => a.origine === 'merck').forEach(a => {
     (a.strumenti || []).forEach(s => {
       if (!s.seriale || !a.data) return;
@@ -10173,6 +10209,30 @@ async function merckCorreggiNumeriChiamata() {
       // Completa il "Tipo intervento" (Work Order Type) dove manca, indipendentemente dal
       // fatto che il numero WO fosse già corretto o meno.
       if (!a.tipo && fresca.tipoChiamata) { a.tipo = fresca.tipoChiamata; tipiCompletati++; }
+
+      // Ritenta anche l'abbinamento cliente: prima di questo fix "Account Name" (il
+      // distributore) veniva confuso con "Location Name" (il vero cliente/sede), quindi
+      // diverse chiamate sono rimaste senza cliente pur avendone uno riconoscibile.
+      if (!a.clienteId && fresca.clientePortale) {
+        const t = trovaClienteDaSeriale(s.seriale);
+        let clienteTrovato = t.cliente || null;
+        if (!clienteTrovato) {
+          const nome = fresca.clientePortale.toLowerCase();
+          clienteTrovato = DB.clienti.find(x => String(x.ragione || '').toLowerCase() === nome)
+            || DB.clienti.find(x => { const r = String(x.ragione || '').toLowerCase(); return r.length > 4 && (r.includes(nome) || nome.includes(r)); });
+        }
+        if (clienteTrovato) {
+          a.clienteId = clienteTrovato.id;
+          clientiCollegati++;
+        } else if (!idGiaSegnalati.has(a.id)) {
+          a.clienteDatiPortale = {
+            ragione: fresca.clientePortale, citta: fresca.citta || '', indirizzo: fresca.indirizzo || '',
+            referente: fresca.referente || '', telefono: fresca.telefono || ''
+          };
+          senzaClienteDaCreare.push(a);
+          idGiaSegnalati.add(a.id);
+        }
+      }
 
       if (fresca.numeroChiamata === s.numeroChiamata) return; // numero già corretto
 
@@ -10191,14 +10251,22 @@ async function merckCorreggiNumeriChiamata() {
     });
   });
 
-  if (!corrette && !tipiCompletati) {
+  if (!corrette && !tipiCompletati && !clientiCollegati && !senzaClienteDaCreare.length) {
     mostraToast(`Nessuna correzione necessaria.${senzaMatch ? ` ${senzaMatch} chiamata/e non trovate nell'elenco scaricato (forse chiuse/filtrate).` : ''}${daControllareAMano ? ` ${daControllareAMano} da controllare a mano (ambigue o intervento già modificato).` : ''}`, 'info');
     return;
   }
   DB.save();
-  DB.auditLog('update', 'appuntamento', null, `Corretti ${corrette} numeri WO e completati ${tipiCompletati} tipi intervento da portale Merck (${interventiCorretti} interventi collegati aggiornati)`);
+  DB.auditLog('update', 'appuntamento', null, `Corretti ${corrette} numeri WO, completati ${tipiCompletati} tipi intervento e ricollegati ${clientiCollegati} clienti da portale Merck (${interventiCorretti} interventi collegati aggiornati)`);
   renderAll();
-  mostraToast(`✅ Corretti ${corrette} numeri WO, completati ${tipiCompletati} tipi intervento (${interventiCorretti} interventi collegati aggiornati).${daControllareAMano ? `\n⚠️ ${daControllareAMano} da controllare a mano (ambigue, o intervento già modificato manualmente).` : ''}${senzaMatch ? `\n${senzaMatch} non trovate nell'elenco attuale del portale.` : ''}`, 'success');
+  mostraToast(`✅ Corretti ${corrette} numeri WO, completati ${tipiCompletati} tipi intervento, ricollegati ${clientiCollegati} clienti (${interventiCorretti} interventi collegati aggiornati).${daControllareAMano ? `\n⚠️ ${daControllareAMano} da controllare a mano (ambigue, o intervento già modificato manualmente).` : ''}${senzaMatch ? `\n${senzaMatch} non trovate nell'elenco attuale del portale.` : ''}`, 'success');
+
+  if (senzaClienteDaCreare.length) {
+    const nomi = [...new Set(senzaClienteDaCreare.map(a => a.clienteDatiPortale.ragione))];
+    const elenco = nomi.slice(0, 8).join('\n• ') + (nomi.length > 8 ? `\n… e altri ${nomi.length - 8}` : '');
+    if (confirm(`${senzaClienteDaCreare.length} appuntament${senzaClienteDaCreare.length === 1 ? 'o ha' : 'i hanno'} ancora un cliente non presente in archivio:\n\n• ${elenco}\n\nVuoi creare subito queste schede cliente con i dati letti dal portale e collegarle?`)) {
+      merckCreaClientiDaPortale(senzaClienteDaCreare);
+    }
+  }
 }
 
 function merckSalvaHtmlDebug() {
@@ -10302,6 +10370,7 @@ async function confermaCreaAppuntamentiMerck() {
   if (!daCreare.length) { mostraToast('Tutte le chiamate selezionate risultano già presenti.', 'info'); return; }
 
   let creati = 0;
+  const senzaCliente = [];
   daCreare.forEach(c => {
     const app = {
       id: DB.nextId('appuntamento'),
@@ -10320,6 +10389,16 @@ async function confermaCreaAppuntamentiMerck() {
       chiamata: c.numeroChiamata || '',
       createdAt: new Date().toISOString()
     };
+    // Senza corrispondenza in archivio: il nome e i dati letti dal portale NON vanno persi
+    // (prima sparivano del tutto, mostrando solo "N/D" — impossibile capire di chi fosse la
+    // chiamata senza tornare sul portale). Restano qui finché non si crea/collega il cliente.
+    if (!c.clienteId && c.clientePortale) {
+      app.clienteDatiPortale = {
+        ragione: c.clientePortale, citta: c.citta || '', indirizzo: c.indirizzo || '',
+        referente: c.referente || '', telefono: c.telefono || ''
+      };
+      senzaCliente.push(app);
+    }
     DB.appuntamenti.push(app);
     creati++;
   });
@@ -10328,6 +10407,69 @@ async function confermaCreaAppuntamentiMerck() {
   closeModal('modalMerckChiamate');
   renderAll();
   mostraToast(`✅ Creati ${creati} appuntament${creati === 1 ? 'o' : 'i'} da Merck${saltate ? ` — ${saltate} già presenti, saltate` : ''}.\nGli appuntamenti Merck sono evidenziati in verde acqua sia in lista sia nel calendario.`, 'success');
+
+  if (senzaCliente.length) {
+    const nomi = [...new Set(senzaCliente.map(a => a.clienteDatiPortale.ragione))];
+    const elenco = nomi.slice(0, 8).join('\n• ') + (nomi.length > 8 ? `\n… e altri ${nomi.length - 8}` : '');
+    if (confirm(`${senzaCliente.length} appuntament${senzaCliente.length === 1 ? 'o importato ha' : 'i importati hanno'} un cliente non presente in archivio:\n\n• ${elenco}\n\nVuoi creare subito queste schede cliente con i dati letti dal portale (ragione sociale, città, indirizzo, referente, telefono) e collegarle agli appuntamenti?`)) {
+      merckCreaClientiDaPortale(senzaCliente);
+    }
+  }
+}
+
+// Crea in archivio le schede cliente mancanti partendo dai dati letti dal portale Merck
+// (clienteDatiPortale, salvato sull'appuntamento quando l'abbinamento automatico per
+// matricola/nome non trova nulla) e ricollega subito gli appuntamenti coinvolti. Più
+// appuntamenti con la stessa ragione sociale (stesso cliente, chiamate diverse) producono
+// UNA sola scheda cliente condivisa, non un duplicato per ciascuno.
+function merckCreaClientiDaPortale(appuntamentiSenzaCliente) {
+  const perRagione = new Map();
+  let creati = 0, collegati = 0;
+  appuntamentiSenzaCliente.forEach(a => {
+    const d = a.clienteDatiPortale;
+    if (!d || !d.ragione) return;
+    const chiave = d.ragione.trim().toLowerCase();
+    let clienteId = perRagione.get(chiave);
+    if (!clienteId) {
+      const cl = {
+        id: DB.nextId('cliente'),
+        ragione: d.ragione, tipo: '', codice: '',
+        indirizzo: d.indirizzo || '', citta: d.citta || '', cap: '', prov: '', piva: '',
+        km_reali: '', pedaggio: '', referente: d.referente || '', tel: d.telefono || '', email: '',
+        contratto: '', scadenza: '', strumentiInstallati: [], strumenti: '',
+        note: 'Creato automaticamente dall\'importazione chiamate Merck',
+        createdAt: new Date().toISOString()
+      };
+      DB.clienti.push(cl);
+      clienteId = cl.id;
+      perRagione.set(chiave, clienteId);
+      creati++;
+    }
+    const live = DB.appuntamenti.find(x => x.id === a.id);
+    if (live) {
+      live.clienteId = clienteId;
+      collegati++;
+    }
+  });
+  DB.save();
+  DB.auditLog('create', 'cliente', null, `Creati ${creati} clienti da importazione Merck e collegati a ${collegati} appuntamenti`);
+  renderAll();
+  mostraToast(`✅ Creat${creati === 1 ? 'o' : 'i'} ${creati} client${creati === 1 ? 'e' : 'i'} e collegat${collegati === 1 ? 'o' : 'i'} ${collegati} appuntament${collegati === 1 ? 'o' : 'i'}.`, 'success');
+}
+
+// Crea/collega il cliente di UN singolo appuntamento già importato (pulsante "➕ Crea" nella
+// riga evidenziata, quando il cliente non è stato trovato al momento dell'import).
+function merckCreaClienteDaAppuntamento(appId) {
+  const a = DB.appuntamenti.find(x => x.id === appId);
+  if (!a || !a.clienteDatiPortale) return;
+  if (!confirm(`Creare il cliente "${a.clienteDatiPortale.ragione}" con i dati letti dal portale e collegarlo a questo appuntamento?`)) return;
+  merckCreaClientiDaPortale([a]);
+  // Se la scheda di questo stesso appuntamento è aperta (il pulsante può essere premuto sia
+  // dalla lista sia dal banner dentro il modal), la si ricarica per mostrare subito il cliente
+  // appena collegato e nascondere il banner di avviso.
+  if (editAppuntamentoId === appId && document.getElementById('modalAppuntamento')?.classList.contains('open')) {
+    openAppuntamentoModal(appId);
+  }
 }
 
 // ======================== CALENDARIO APPUNTAMENTI ========================
@@ -10457,10 +10599,11 @@ function renderCalendarioAppuntamenti() {
       // ne è stato fatto. (Nei giorni fuori mese, a inizio/fine griglia, qualunque colore
       // appare più slavato per via del dimming CSS di quelle celle — non è un colore diverso.)
       const colore = (a.origine === 'merck' && a.stato === 'Programmato') ? '#9333ea' : (statoColori[a.stato] || '#64748b');
-      const label = cl ? cl.ragione : 'N/D';
+      const senzaCliente = !cl && !!a.clienteDatiPortale?.ragione;
+      const label = cl ? cl.ragione : (senzaCliente ? a.clienteDatiPortale.ragione : 'N/D');
       const iconaTipo = _iconaTipoIntervento(a.tipo);
-      const titolo = (a.origine === 'merck' ? '📥 Da portale Merck · ' : '') + (iconaTipo ? iconaTipo.titolo + ' · ' : '') + label + (a.stato ? ' · ' + a.stato : '');
-      return `<div class="cal-event" style="background:${colore};" title="${escAttr(titolo)}" onclick="event.stopPropagation(); openAppuntamentoModal(${a.id})">${iconaTipo ? iconaTipo.icona + ' ' : ''}${escHtml(label)}</div>`;
+      const titolo = (a.origine === 'merck' ? '📥 Da portale Merck · ' : '') + (senzaCliente ? '⚠️ Cliente non in archivio · ' : '') + (iconaTipo ? iconaTipo.titolo + ' · ' : '') + label + (a.stato ? ' · ' + a.stato : '');
+      return `<div class="cal-event" style="background:${colore};${senzaCliente ? 'outline:2px dashed #f59e0b;outline-offset:-2px;' : ''}" title="${escAttr(titolo)}" onclick="event.stopPropagation(); openAppuntamentoModal(${a.id})">${senzaCliente ? '⚠️ ' : ''}${iconaTipo ? iconaTipo.icona + ' ' : ''}${escHtml(label)}</div>`;
     }).join('');
     const altriHtml = eventiGiorno.length > maxMostrati ? `<div class="cal-more">+${eventiGiorno.length - maxMostrati} altri</div>` : '';
 
