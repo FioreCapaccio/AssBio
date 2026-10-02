@@ -3721,9 +3721,28 @@
 </div>
 
 <script>
+// ======================== DIALOGHI NATIVI E FOCUS ========================
+// In Electron, dopo un confirm()/alert() nativo la finestra può restare senza il focus di
+// tastiera: i campi di testo sembrano normali ma non accettano più la digitazione, e si
+// "sbloccano" solo cambiando finestra. Dopo ogni dialogo si chiede al processo principale di
+// riportare il focus alla pagina e si rimette il cursore nel campo che era attivo.
+(function () {
+  const confirmNativo = window.confirm.bind(window);
+  const alertNativo = window.alert.bind(window);
+  const ripristina = () => {
+    const attivo = document.activeElement;
+    try { if (window.ivdFS && window.ivdFS.ripristinaFocus) window.ivdFS.ripristinaFocus(); } catch (e) {}
+    setTimeout(() => {
+      try { if (attivo && attivo !== document.body && document.contains(attivo)) attivo.focus(); } catch (e) {}
+    }, 30);
+  };
+  window.confirm = (msg) => { const r = confirmNativo(msg); ripristina(); return r; };
+  window.alert = (msg) => { alertNativo(msg); ripristina(); };
+})();
+
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.31 • 1 ott 2026';
+const APP_VERSION = '2.10.32 • 2 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4207,15 +4226,11 @@ const DB = {
             // syncDown in modalità automatica per chiedere conferma prima di sostituire gli
             // archivi locali con quelli del cloud (viene rimosso dopo un syncUp riuscito).
             try { localStorage.setItem('ivd_dirty', '1'); } catch (e) {}
+            // Upload cloud: raggruppato e "single-flight" (vedi SUPABASE.richiediSyncUp). Prima i
+            // salvataggi arrivati a meno di 10s dall'upload precedente venivano SCARTATI senza
+            // essere mai ritentati: l'ultima modifica restava solo in locale.
             try {
-                if (typeof SUPABASE !== 'undefined' && SUPABASE.isLoggedIn) {
-                    if (!SUPABASE._syncDebounce) SUPABASE._syncDebounce = 0;
-                    const now = Date.now();
-                    if (now - SUPABASE._syncDebounce > 10000) {
-                        SUPABASE._syncDebounce = now;
-                        SUPABASE.syncUp();
-                    }
-                }
+                if (typeof SUPABASE !== 'undefined' && SUPABASE.isLoggedIn) SUPABASE.richiediSyncUp();
             } catch (e) {}
         };
 
@@ -7015,6 +7030,7 @@ const SUPABASE = {
     
     this._session = data.session;
     this.isLoggedIn = true;
+    this._firmeCaricate = {}; // un altro account: nessun record risulta già caricato
     this.onLoginSuccess();
     await this.syncDown(true);
   },
@@ -7024,6 +7040,8 @@ const SUPABASE = {
     if (sb) await sb.auth.signOut();
     this._session = null;
     this.isLoggedIn = false;
+    this._firmeCaricate = {};
+    clearTimeout(this._syncTimer); this._syncTimer = null;
     this.onLogout();
     DB.flush().then(() => location.reload());
   },
@@ -7147,13 +7165,21 @@ const SUPABASE = {
     const localIds = new Set((records || []).map(r => r.id));
 
     if (records && records.length) {
-      const rows = records.map(r => ({ user_id: userId, id: r.id, data: r, updated_at: nowLocal }));
-      for (let i = 0; i < rows.length; i += 100) {
-        const batch = rows.slice(i, i + 100);
-        const { error } = await sb.from(table).upsert(batch, { onConflict: 'user_id,id', ignoreDuplicates: false });
-        if (error) throw new Error(`Errore upsert ${table}: ${error.message}`);
+      // Si caricano solo i record nuovi o modificati rispetto all'ultimo upload di questa
+      // sessione (il primo upload dopo l'avvio li carica tutti, come prima).
+      const firme = this._firmeCaricate[table] || (this._firmeCaricate[table] = new Map());
+      const daCaricare = [];
+      for (const r of records) {
+        const f = this._firmaRecord(r);
+        if (firme.get(r.id) !== f) daCaricare.push({ f, row: { user_id: userId, id: r.id, data: r, updated_at: nowLocal } });
       }
-      console.log(`[Supabase] Uploaded ${rows.length} records to ${table}`);
+      for (let i = 0; i < daCaricare.length; i += 100) {
+        const batch = daCaricare.slice(i, i + 100);
+        const { error } = await sb.from(table).upsert(batch.map(b => b.row), { onConflict: 'user_id,id', ignoreDuplicates: false });
+        if (error) throw new Error(`Errore upsert ${table}: ${error.message}`);
+        batch.forEach(b => firme.set(b.row.id, b.f));
+      }
+      console.log(`[Supabase] Uploaded ${daCaricare.length}/${records.length} records to ${table}`);
     }
 
     // BUG FIX: l'upsert da solo non cancella mai nulla — un record eliminato in locale
@@ -7189,10 +7215,67 @@ const SUPABASE = {
     }
   },
 
-  async syncUp() {
+  // Upload verso il cloud "single-flight" con coda finale (trailing). Prima DB.save() lanciava
+  // syncUp() al massimo ogni 10s e SCARTAVA i salvataggi intermedi: l'ultima modifica fatta a
+  // meno di 10s da un upload non veniva mai caricata (né ritentata) finché non ne arrivava
+  // un'altra, e due upload potevano girare insieme finendo fuori ordine. Ora i salvataggi
+  // ravvicinati si raggruppano in un solo upload dopo una breve pausa, gira un upload alla
+  // volta, ciò che cambia durante un upload ne scatena subito un altro, e un upload fallito
+  // (rete assente) viene ritentato ogni 30s.
+  _syncRichiesto: false,
+  _syncInCorso: false,
+  _syncTimer: null,
+  richiediSyncUp() {
+    if (!this.isLoggedIn) return;
+    this._syncRichiesto = true;
+    if (this._syncInCorso || this._syncTimer) return;
+    this._syncTimer = setTimeout(() => this._eseguiSyncUpInCoda(false), 2500);
+  },
+  async _eseguiSyncUpInCoda(silenzioso) {
+    this._syncTimer = null;
+    if (this._syncInCorso) return;
+    this._syncInCorso = true;
+    let fallito = false;
+    try {
+      while (this._syncRichiesto && this.isLoggedIn) {
+        this._syncRichiesto = false;
+        if (await this.syncUp(silenzioso) === false) { fallito = true; break; }
+      }
+    } finally {
+      this._syncInCorso = false;
+    }
+    if (fallito && this.isLoggedIn && !this._syncTimer) {
+      this._syncRichiesto = true;
+      this._syncTimer = setTimeout(() => this._eseguiSyncUpInCoda(true), 30000);
+    }
+  },
+
+  // Firma compatta di un record (lunghezza + hash a 53 bit del JSON): serve a capire se dalla
+  // volta scorsa è cambiato senza tenere in memoria copie intere dei record (che possono
+  // contenere PDF/firme in base64). Prima OGNI upload ricaricava per intero tutti i record di
+  // tutte le tabelle — PDF compresi — rendendo la sincronizzazione lenta, e un dispositivo con
+  // dati vecchi sovrascriveva anche i record che l'altro aveva appena modificato.
+  _firmaRecord(r) {
+    const s = JSON.stringify(r);
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return s.length + ':' + (4294967296 * (2097151 & h2) + (h1 >>> 0));
+  },
+  _firmeCaricate: {},
+
+  async syncUp(silenzioso = false) {
     if (!this.isLoggedIn) return;
     const userId = this.currentUserId;
     const nowLocal = new Date().toISOString();
+    // Contatore dei salvataggi all'avvio di questo upload: se cresce mentre si carica, ci sono
+    // modifiche non incluse e il flag "da sincronizzare" non va azzerato a fine upload.
+    const salvataggiAllAvvio = DB._saveCounter || 0;
 
     try {
       // NOTA: qui c'era un guard che bloccava l'upload se il cloud sembrava "più recente"
@@ -7243,19 +7326,33 @@ const SUPABASE = {
       if (cfgErr) throw new Error(`Errore upsert user_config: ${cfgErr.message}`);
 
       localStorage.setItem('ivd_last_sync', nowLocal);
-      localStorage.removeItem('ivd_dirty'); // modifiche locali ora tutte caricate
+      // Azzera "da sincronizzare" SOLO se nessun salvataggio è arrivato durante l'upload:
+      // altrimenti quelle modifiche non erano incluse e verrebbero date per caricate.
+      if ((DB._saveCounter || 0) === salvataggiAllAvvio) localStorage.removeItem('ivd_dirty');
       console.log('[Supabase] Sync Up completato');
       mostraToast('☁️ Dati sincronizzati su Supabase', 'success');
+      return true;
     } catch (e) {
       console.error('[Supabase] Errore syncUp:', e);
-      mostraToast('❌ Errore sync: ' + (e.message || e), 'danger');
+      if (!silenzioso) mostraToast('❌ Errore sync: ' + (e.message || e), 'danger');
+      return false;
     }
+  },
+
+  // true se l'utente sta lavorando: una finestra di modifica è aperta. Usato per non
+  // sostituire gli archivi e ricaricare la pagina sotto le mani di chi sta compilando un form.
+  _utenteStaLavorando() {
+    return !!document.querySelector('.modal-overlay.open');
   },
 
   async syncDown(isManual = false) {
     if (!this.isLoggedIn) { console.warn('[Supabase] syncDown: utente non loggato (isLoggedIn=false), sync saltata.'); return false; }
     const userId = this.currentUserId;
     console.log('[Supabase] syncDown: avviato, userId =', userId);
+    // Salvataggi fatti DOPO questo punto sono modifiche dell'utente non presenti nello snapshot
+    // che si sta per scaricare: in modalità automatica non vanno mai sovrascritte.
+    const salvataggiAllAvvio = DB._saveCounter || 0;
+    const utenteHaModificato = () => (DB._saveCounter || 0) !== salvataggiAllAvvio;
 
     try {
       const cloudCfg = await this._fetchCloudConfig();
@@ -7278,6 +7375,16 @@ const SUPABASE = {
       console.log(`[Supabase] syncDown: cloud.last_update="${cloudCfg.last_update}" (${cloudTime}) vs locale ivd_last_sync="${localSync}" (${localTime}) → cloudNewer=${cloudNewer}`);
 
       if (!cloudNewer) {
+        // Il cloud non ha nulla di più recente: se in locale restano modifiche mai caricate
+        // (upload saltato o fallito in precedenza) vanno caricate ORA, invece di dichiarare
+        // "già aggiornato" e lasciarle indietro.
+        if (localStorage.getItem('ivd_dirty') === '1') {
+          if (isManual) {
+            await this.syncUp();
+            return false;
+          }
+          this.richiediSyncUp();
+        }
         if (isManual) mostraToast('✅ Dati sincronizzati! Database già aggiornato.', 'success');
         return false;
       }
@@ -7292,7 +7399,10 @@ const SUPABASE = {
       }
 
       if (isManual) {
-        if (!confirm(`Supabase: Trovati dati più recenti (del ${new Date(cloudCfg.last_update).toLocaleString()}). Caricarli?\n\n⚠️ I PDF Merck allegati localmente non verranno sovrascritti.`)) return false;
+        const avvisoModifiche = localStorage.getItem('ivd_dirty') === '1'
+          ? '\n\n⚠️ ATTENZIONE: su questo dispositivo ci sono modifiche NON ancora caricate sul cloud: scaricando andranno perse.'
+          : '';
+        if (!confirm(`Supabase: Trovati dati più recenti (del ${new Date(cloudCfg.last_update).toLocaleString()}). Caricarli?\n\n⚠️ I PDF Merck allegati localmente non verranno sovrascritti.${avvisoModifiche}`)) return false;
       }
 
       // 'appuntamenti' incluso qui senza bisogno di isolamento: _downloadTable() ora
@@ -7302,6 +7412,20 @@ const SUPABASE = {
       // da propagare, non un errore.
       const tableNames = ['clienti', 'interventi', 'ricambi', 'fornitori', 'bolle', 'ordini', 'inventari', 'appuntamenti'];
       const results = await this._downloadAll(tableNames, userId);
+
+      // Il download può richiedere diversi secondi (PDF/firme in base64): nel frattempo l'utente
+      // può aver iniziato a lavorare. In modalità automatica NON si sostituiscono gli archivi (e
+      // non si ricarica la pagina) se ha una finestra di modifica aperta o ha già salvato
+      // qualcosa dall'avvio del download: l'ultimo dato inserito verrebbe sovrascritto dallo
+      // snapshot del cloud e il form in compilazione si azzererebbe. Si avvisa e si lascia che
+      // sia lui a scaricare quando ha finito (pulsante Cloud in alto).
+      if (!isManual && (this._utenteStaLavorando() || utenteHaModificato())) {
+        console.warn('[Supabase] syncDown automatico rinviato: l\'utente sta lavorando / ha modificato dati.');
+        const btnNav = document.getElementById('navSyncBtn');
+        if (btnNav) btnNav.textContent = '🟠 Cloud: dati nuovi';
+        mostraToast('☁️ Sul cloud ci sono dati più recenti, ma stai lavorando: non li ho applicati per non farti perdere le modifiche.\nQuando hai finito premi "Cloud" in alto per scaricarli.', 'warning');
+        return false;
+      }
       let okCount = 0;
 
       // BUG FIX (collisione ID cross-device): ogni dispositivo genera gli id con un contatore
@@ -7413,6 +7537,13 @@ const SUPABASE = {
       if (collisioneRilevata) {
         mostraToast('⚠️ Rilevata una collisione di ID tra dispositivi diversi: alcuni record sono stati rinumerati automaticamente per evitare di perderli. Controlla eventuali duplicati.', 'warning');
         await this.syncUp(); // pubblica subito i record rinumerati e il contatore aggiornato
+      }
+      // Durante le attese qui sopra (flush + scrittura su disco) l'utente può aver aperto un
+      // form: in modalità automatica non si ricarica la pagina sotto le sue mani — i dati
+      // scaricati sono già in memoria e su disco, basta ridisegnare le viste.
+      if (!isManual && (this._utenteStaLavorando() || utenteHaModificato())) {
+        try { renderAll(); } catch (e) {}
+        return true;
       }
       location.reload();
       return true;
@@ -9415,7 +9546,11 @@ function selezionaClienteAppuntamento(id) {
   document.getElementById('app_cliente').value = id;
   document.getElementById('app_cliente_search').value = cl.ragione;
   document.getElementById('app_cliente_dropdown').style.display = 'none';
-  aggiornaStrumentiClienteAppuntamento();
+  // Gli strumenti legati a una chiamata (con numero di chiamata o intervento collegato, es.
+  // quelli importati da Merck) appartengono alla chiamata, non al cliente: restano nella lista
+  // anche se non compaiono tra gli strumenti installati del cliente appena scelto.
+  const legatiAllaChiamata = _leggiStrumentiSelezionatiAppuntamento().filter(s => s.numeroChiamata || s.interventoId);
+  aggiornaStrumentiClienteAppuntamento(legatiAllaChiamata.length ? legatiAllaChiamata : null);
 }
 
 if (!window._clienteAppDropdownCloserInstalled) {
@@ -9507,7 +9642,16 @@ function aggiornaStrumentiClienteAppuntamento(preselezionati = null) {
   const cid = parseInt(document.getElementById('app_cliente').value);
   const cl = DB.clienti.find(c => c.id === cid);
   const wrap = document.getElementById('app_strumenti_lista');
-  if (!cl) { wrap.innerHTML = '<span style="font-size:0.8rem; color:var(--text-muted);">Seleziona prima un cliente</span>'; return; }
+  if (!cl) {
+    // Nessun cliente (es. chiamata Merck con cliente non ancora in archivio): gli strumenti già
+    // salvati sull'appuntamento restano visibili e modificabili. Prima la lista si svuotava e
+    // salvando l'appuntamento strumenti e numero di chiamata (WO) andavano persi.
+    const salvati = preselezionati || [];
+    wrap.innerHTML = salvati.length
+      ? salvati.map(p => _rigaCheckboxStrumentoAppuntamento(p.modello, p.seriale, true, p.numeroChiamata, p.interventoId)).join('')
+      : '<span style="font-size:0.8rem; color:var(--text-muted);">Seleziona prima un cliente</span>';
+    return;
+  }
 
   const strumenti = cl.strumentiInstallati || migraStrumenti(cl.strumenti||'');
   // Mappa (non Set) perché ogni voce preselezionata porta con sé anche il numero di chiamata
@@ -9601,9 +9745,15 @@ function _salvaAppuntamentoImpl() {
 // fatte (es. un numero di chiamata digitato un istante prima di premere "Crea intervento").
 // Ritorna l'id dell'appuntamento salvato, o null se la validazione fallisce.
 function _persistiAppuntamentoDaForm() {
-  const clienteId = parseInt(document.getElementById('app_cliente').value);
+  const clienteId = parseInt(document.getElementById('app_cliente').value) || null;
   const data = document.getElementById('app_data').value;
-  if (!clienteId) { mostraToast('Seleziona un cliente'); return null; }
+  if (!clienteId) {
+    // Eccezione: una chiamata importata da Merck il cui cliente non è ancora in archivio
+    // (clienteDatiPortale) si può salvare "da assegnare" — prima il controllo bloccava anche
+    // la semplice modifica di orario, tecnico o note, senza alcuna via d'uscita.
+    const esistente = editAppuntamentoId ? DB.appuntamenti.find(x => x.id === editAppuntamentoId) : null;
+    if (!(esistente && esistente.clienteDatiPortale)) { mostraToast('Seleziona un cliente'); return null; }
+  }
   if (!data) { mostraToast('Inserisci la data'); return null; }
 
   const strumentiSelezionati = _leggiStrumentiSelezionatiAppuntamento();
@@ -9676,6 +9826,20 @@ function convertiAppuntamentoInIntervento(id = null) {
   }
   const a = DB.appuntamenti.find(x => x.id === appId);
   if (!a) return;
+
+  // L'intervento richiede un cliente. Per una chiamata Merck il cui cliente non è ancora in
+  // archivio, invece di aprire una scheda con cliente vuoto (impossibile da salvare: il form
+  // pretende un cliente esistente e non c'era modo di crearlo da lì), si propone di crearlo ora
+  // con i dati letti dal portale e si prosegue.
+  if (!a.clienteId) {
+    if (!a.clienteDatiPortale?.ragione) {
+      mostraToast('Assegna prima un cliente all\'appuntamento.', 'warning');
+      return;
+    }
+    if (!confirm(`Il cliente "${a.clienteDatiPortale.ragione}" non è ancora in archivio.\n\nCrearlo ora con i dati letti dal portale Merck e proseguire con la creazione dell'intervento?`)) return;
+    merckCreaClientiDaPortale([a]);
+    if (!a.clienteId) return;
+  }
 
   const strumenti = _elencoStrumentiAppuntamento(a);
   if (!strumenti.length) { mostraToast('Nessuno strumento selezionato per questo appuntamento.'); return; }
@@ -10433,13 +10597,28 @@ async function confermaCreaAppuntamentiMerck() {
 function merckCreaClientiDaPortale(appuntamentiSenzaCliente) {
   const perRagione = new Map();
   let creati = 0, collegati = 0;
+  // Lo strumento della chiamata (modello + matricola) viene registrato anche sulla scheda
+  // cliente: serve a riconoscere il cliente dalla matricola nelle importazioni successive e a
+  // precompilare lo strumento quando si crea l'intervento.
+  const registraStrumenti = (cl, app) => {
+    cl.strumentiInstallati = cl.strumentiInstallati || [];
+    (app.strumenti || []).forEach(s => {
+      if (!s.modello && !s.seriale) return;
+      const esiste = cl.strumentiInstallati.some(x => (x.modello || '') === (s.modello || '') && (x.seriale || '') === (s.seriale || ''));
+      if (!esiste) cl.strumentiInstallati.push({ modello: s.modello || '', seriale: s.seriale || '', fornitoreId: null, mercato: 'Standard' });
+    });
+    cl.strumenti = cl.strumentiInstallati.map(s => s.modello).join('\n');
+  };
   appuntamentiSenzaCliente.forEach(a => {
     const d = a.clienteDatiPortale;
     if (!d || !d.ragione) return;
     const chiave = d.ragione.trim().toLowerCase();
-    let clienteId = perRagione.get(chiave);
-    if (!clienteId) {
-      const cl = {
+    let cl = perRagione.get(chiave)
+      // Un cliente con la stessa ragione sociale può esistere già (creato poco prima da un'altra
+      // chiamata dello stesso cliente): si riusa invece di crearne un doppione.
+      || DB.clienti.find(x => String(x.ragione || '').trim().toLowerCase() === chiave);
+    if (!cl) {
+      cl = {
         id: DB.nextId('cliente'),
         ragione: d.ragione, tipo: '', codice: '',
         indirizzo: d.indirizzo || '', citta: d.citta || '', cap: '', prov: '', piva: '',
@@ -10449,13 +10628,13 @@ function merckCreaClientiDaPortale(appuntamentiSenzaCliente) {
         createdAt: new Date().toISOString()
       };
       DB.clienti.push(cl);
-      clienteId = cl.id;
-      perRagione.set(chiave, clienteId);
       creati++;
     }
+    perRagione.set(chiave, cl);
     const live = DB.appuntamenti.find(x => x.id === a.id);
     if (live) {
-      live.clienteId = clienteId;
+      live.clienteId = cl.id;
+      registraStrumenti(cl, live);
       collegati++;
     }
   });

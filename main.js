@@ -73,6 +73,40 @@ function inCoda(fn) {
   return p;
 }
 
+// Ogni richiesta "archivio:scrivi" porta una FOTOGRAFIA COMPLETA degli archivi: se mentre una
+// scrittura è in corso ne arrivano altre, quelle intermedie sono già superate dall'ultima.
+// Prima venivano accodate tutte (e ogni salvataggio riscrive tutti i file, PDF in base64
+// compresi): con più salvataggi ravvicinati la coda si allungava e il dato più recente
+// arrivava su disco con grande ritardo — o non faceva in tempo ad arrivarci prima della
+// chiusura dell'app. Ora le richieste ancora in attesa si fondono in UNA scrittura che
+// contiene, per ogni file, il contenuto più recente; chi aspettava riceve l'esito comune.
+let _scritturaInAttesa = null;
+function scriviArchivioRaggruppato(payload) {
+  return new Promise((resolve, reject) => {
+    if (_scritturaInAttesa) {
+      Object.assign(_scritturaInAttesa.payload, payload);
+      _scritturaInAttesa.waiters.push({ resolve, reject });
+      return;
+    }
+    const giro = { payload: { ...payload }, waiters: [{ resolve, reject }] };
+    _scritturaInAttesa = giro;
+    inCoda(async () => {
+      _scritturaInAttesa = null; // da qui in poi le nuove richieste formano il giro successivo
+      try {
+        await assicuraCartelle();
+        const { dati } = percorsi();
+        for (const nome of Object.keys(giro.payload)) {
+          await scriviFileAtomico(path.join(dati, nome), giro.payload[nome]);
+        }
+        const esito = { ok: true, scritti: Object.keys(giro.payload) };
+        giro.waiters.forEach(w => w.resolve(esito));
+      } catch (e) {
+        giro.waiters.forEach(w => w.reject(e));
+      }
+    });
+  });
+}
+
 async function scriviFileAtomico(filePath, content) {
   const tmp = filePath + '.tmp';
   await scriviConTimeout(fsp.writeFile(tmp, content, 'utf8'));
@@ -99,6 +133,17 @@ function scriviConTimeout(p) { return conTimeout(p, OP_TIMEOUT_MS, 'scrittura');
 function registraCanaliArchivio() {
   cartellaDati = risolviCartellaDati();
   cartellaBackupOverride = leggiConfig().cartellaBackup || null;
+
+  // Dopo un confirm()/alert() nativo, in Electron la finestra può restare senza il focus di
+  // tastiera: i campi sembrano normali ma non accettano più la digitazione ("campi bloccati")
+  // finché non si cambia finestra. Il renderer chiama questo canale subito dopo ogni dialogo.
+  ipcMain.handle('finestra:ripristinaFocus', (event) => {
+    const w = BrowserWindow.fromWebContents(event.sender);
+    if (!w || w.isDestroyed()) return false;
+    if (!w.isFocused()) w.focus();
+    w.webContents.focus();
+    return true;
+  });
 
   ipcMain.handle('archivio:info', async () => {
     await assicuraCartelle();
@@ -133,19 +178,16 @@ function registraCanaliArchivio() {
     return { dir: cartellaDati, files };
   });
 
-  ipcMain.handle('archivio:scrivi', (event, payload) => inCoda(async () => {
+  ipcMain.handle('archivio:scrivi', (event, payload) => {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new Error('Payload non valido');
     }
-    await assicuraCartelle();
-    const { dati } = percorsi();
     for (const nome of Object.keys(payload)) {
       if (!FILE_WHITELIST.includes(nome)) throw new Error('Nome file non consentito: ' + nome);
       if (typeof payload[nome] !== 'string') throw new Error('Contenuto non valido per ' + nome);
-      await scriviFileAtomico(path.join(dati, nome), payload[nome]);
     }
-    return { ok: true, scritti: Object.keys(payload) };
-  }));
+    return scriviArchivioRaggruppato(payload);
+  });
 
   // Snapshot completo dell'archivio scritto dal renderer (che possiede i dati) con
   // rotazione gestita qui: tengo gli ultimi BACKUP_KEEP file. Scrive nella cartella di
@@ -957,6 +999,18 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+// Prima di uscire (chiusura finestra su Windows/Linux, Cmd+Q su macOS) si attende il
+// completamento delle scritture dell'archivio già richieste dal renderer: prima il processo
+// terminava subito e l'ultimo salvataggio, ancora in coda o a metà, andava perso. Attesa
+// massima 8s per non bloccare l'uscita se la cartella non risponde.
+let _uscitaGestita = false;
+app.on('before-quit', (event) => {
+  if (_uscitaGestita) return;
+  _uscitaGestita = true;
+  event.preventDefault();
+  Promise.race([_writeQueue, new Promise(r => setTimeout(r, 8000))]).finally(() => app.exit(0));
 });
 
 // Profilo userData alternativo per test/diagnostica (es. riprodurre un problema con una

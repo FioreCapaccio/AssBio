@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('ivdFS', {
   scegliCartella: () => ipcRenderer.invoke('archivio:scegliCartella'),
   spostaArchivio: () => ipcRenderer.invoke('archivio:sposta'),
   impostaCartellaBackup: (percorso) => ipcRenderer.invoke('archivio:impostaCartellaBackup', percorso),
+  // Riporta il focus di tastiera alla pagina dopo un confirm()/alert() nativo (vedi main.js).
+  ripristinaFocus: () => ipcRenderer.invoke('finestra:ripristinaFocus'),
 });
 
 // Ponte per il portale Merck (chiamate/WO → appuntamenti). Solo invoke verso canali
