@@ -3744,7 +3744,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.33 • 2 ott 2026';
+const APP_VERSION = '2.10.34 • 2 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -9885,11 +9885,20 @@ function _apriProssimoInterventoDaCoda() {
   const fatti = totale - daConvertire.length;
 
   openInterventoModal();
-  document.getElementById('i_cliente').value = a.clienteId || '';
-  _sincronizzaTestoClienteIntervento();
-  aggiornaStrumentiCliente();
-  document.getElementById('i_strumento').value = prossimo.modello || '';
-  document.getElementById('i_seriale').value = prossimo.seriale || '';
+  // Stesso percorso della scelta manuale dello strumento (_selezionaStrumento): oltre a
+  // cliente, modello e matricola imposta il FORNITORE dello strumento e, per INTELSINT, il suo
+  // progressivo "NN-AA". Prima qui i campi venivano valorizzati a mano, senza fornitore: da
+  // appuntamento il numero restava il WO-xxxx standard anche per gli strumenti INTELSINT.
+  const cliApp = DB.clienti.find(c => c.id === a.clienteId);
+  const strumentiCliente = cliApp ? (cliApp.strumentiInstallati || migraStrumenti(cliApp.strumenti || '')) : [];
+  const modelloL = String(prossimo.modello || '').trim().toLowerCase();
+  const serialeL = String(prossimo.seriale || '').trim().toLowerCase();
+  const strumentoCliente = strumentiCliente.find(s => serialeL && String(s.seriale || '').trim().toLowerCase() === serialeL)
+    || strumentiCliente.find(s => modelloL && String(s.modello || '').trim().toLowerCase() === modelloL);
+  _selezionaStrumento(a.clienteId || '', prossimo.modello || '', prossimo.seriale || '',
+    strumentoCliente ? strumentoCliente.fornitoreId : null, 'i_seriale_results');
+  // Un numero di chiamata scritto esplicitamente sull'appuntamento ha la precedenza sul
+  // progressivo proposto automaticamente.
   if (prossimo.numeroChiamata) document.getElementById('i_numero').value = prossimo.numeroChiamata;
   document.getElementById('i_problema').value = a.problema || '';
   document.getElementById('i_data').value = a.data || today();
