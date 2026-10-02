@@ -322,6 +322,12 @@ function registraCanaliArchivio() {
 const MERCK_PARTITION = 'persist:merck';
 let merckFinestraLogin = null;
 let merckAutofillTimer = null;
+// Stato dell'accesso al portale, mostrato dal pulsante "Merck" in alto nell'app:
+// 'inattivo' | 'accesso' (login in corso in background) | 'connesso' | 'manuale' (serve la
+// finestra: nessuna credenziale salvata o intervento richiesto) | 'errore'.
+let merckStato = { stato: 'inattivo', dettaglio: '' };
+let merckUltimaDiagnostica = '';
+let merckMonitor = null; // { timer, fine } del controllo esito accesso in corso
 
 // User-Agent standard da Chrome desktop invece di quello di default di Electron (che
 // contiene la sottostringa "Electron/x.y.z"): molti portali aziendali — Salesforce
@@ -460,6 +466,7 @@ const MERCK_SERIALIZZA_RADICI = `(() => {
 // portale: impossibile non vederlo.
 function merckInviaDiagnostica(messaggio, win) {
   console.log('[Merck]', messaggio);
+  merckUltimaDiagnostica = String(messaggio);
   try {
     if (finestraPrincipale && !finestraPrincipale.isDestroyed()) {
       finestraPrincipale.webContents.send('merck:diagnostica', messaggio);
@@ -709,7 +716,7 @@ async function merckScaricaRenderizzato(url) {
     try {
       win = new BrowserWindow({
         show: false, width: 1360, height: 900,
-        webPreferences: { session: merckSessione(), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, navigateOnDragDrop: false }
+        webPreferences: { session: merckSessione(), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, navigateOnDragDrop: false, backgroundThrottling: false }
       });
     } catch (e) { resolve({ ok: false, errore: e.message || String(e) }); return; }
     win.loadURL(url).catch(() => {});
@@ -752,6 +759,167 @@ async function merckScaricaRenderizzato(url) {
   });
 }
 
+// ============================================================================
+// ACCESSO AL PORTALE IN BACKGROUND
+// ============================================================================
+function merckImpostaStato(stato, dettaglio = '') {
+  merckStato = { stato, dettaglio };
+  try {
+    if (finestraPrincipale && !finestraPrincipale.isDestroyed()) finestraPrincipale.webContents.send('merck:stato', merckStato);
+  } catch { /* finestra principale non pronta */ }
+}
+
+function merckMostraFinestra() {
+  const w = merckFinestraLogin;
+  if (!w || w.isDestroyed()) return false;
+  if (w.isMinimized()) w.restore();
+  w.show();
+  w.focus();
+  return true;
+}
+
+// Stato della pagina attualmente caricata nella finestra del portale: c'è ancora un campo
+// password visibile (= non si è entrati) e il portale mostra un errore di credenziali?
+const MERCK_STATO_PAGINA_SCRIPT = `(() => {
+  ${MERCK_COLLEZIONA_RADICI}
+  let passwordVisibile = false, errore = false;
+  for (const root of radici) {
+    try {
+      for (const p of root.querySelectorAll('input[type=password]')) {
+        const r = p.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) passwordVisibile = true;
+      }
+      // Conta solo il testo di errore VISIBILE: molte pagine contengono nel DOM il messaggio
+      // di errore già pronto ma nascosto (display:none), che non va scambiato per un rifiuto.
+      const re = /login attempt has failed|username and password are correct|credenziali non valide|accesso non riuscito|invalid (username|password)/i;
+      for (const el of root.querySelectorAll('*')) {
+        if (el.children.length || !re.test(el.textContent || '')) continue;
+        const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+        if (r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none') { errore = true; break; }
+      }
+    } catch (e) {}
+  }
+  return { passwordVisibile, errore, url: location.href };
+})()`;
+
+function merckFermaMonitor() {
+  if (merckMonitor) { clearInterval(merckMonitor.timer); merckMonitor = null; }
+}
+
+// Controlla periodicamente la pagina per capire se l'accesso è riuscito. `risolvi` riceve UNA
+// sola volta l'esito (connesso / non connesso con motivo) entro ATTESA_ESITO_MS; il controllo
+// prosegue poi a bassa frequenza per qualche minuto, così un accesso completato a mano nella
+// finestra (es. dopo un'intervento richiesto dal portale) aggiorna comunque lo stato.
+function merckAvviaMonitorAccesso(win, risolvi) {
+  merckFermaMonitor();
+  const ATTESA_ESITO_MS = 45000, DURATA_TOTALE_MS = 10 * 60 * 1000;
+  const inizio = Date.now();
+  let risolto = false, connessiDiSeguito = 0;
+  const fine = (ris) => { if (risolto) return; risolto = true; if (risolvi) risolvi(ris); };
+  const tick = async () => {
+    if (!win || win.isDestroyed()) { merckFermaMonitor(); fine({ connesso: false, dettaglio: 'Finestra del portale chiusa prima della fine dell\'accesso' }); return; }
+    const trascorso = Date.now() - inizio;
+    if (trascorso > DURATA_TOTALE_MS) { merckFermaMonitor(); return; }
+    if (trascorso > ATTESA_ESITO_MS && !risolto) {
+      const motivo = merckUltimaDiagnostica || 'Il portale non ha risposto all\'invio delle credenziali';
+      if (merckStato.stato === 'accesso') merckImpostaStato('errore', motivo);
+      fine({ connesso: false, dettaglio: motivo });
+    }
+    if (win.webContents.isLoading()) return;
+    let s = null;
+    try { s = await win.webContents.executeJavaScript(MERCK_STATO_PAGINA_SCRIPT, true); } catch { return; }
+    if (!s || !/^https?:/i.test(s.url || '')) return;
+    if (s.errore && s.passwordVisibile) {
+      connessiDiSeguito = 0;
+      const motivo = 'Il portale ha rifiutato le credenziali (verifica user/password salvati o aprine la finestra).';
+      merckImpostaStato('errore', motivo);
+      fine({ connesso: false, dettaglio: motivo });
+      return;
+    }
+    const sulLogin = /\/login\b/i.test(s.url);
+    if (!s.passwordVisibile && !sulLogin) {
+      // Due controlli consecutivi, per non scambiare per "entrato" il vuoto di una navigazione in corso.
+      if (++connessiDiSeguito >= 2) {
+        if (merckStato.stato !== 'connesso') merckImpostaStato('connesso', 'Connesso al portale');
+        fine({ connesso: true, dettaglio: 'Connesso al portale' });
+      }
+    } else {
+      connessiDiSeguito = 0;
+    }
+  };
+  merckMonitor = { timer: setInterval(tick, 1500), fine };
+}
+
+// Crea (nascosta, salvo `visibile` o assenza di credenziali) la finestra del portale, avvia
+// l'auto-compilazione del login e restituisce una promise con l'esito. L'auto-compilazione NON
+// gira una sola volta al load: molti portali disegnano il form via JavaScript dopo il
+// caricamento o lo mettono in un iframe. Polling ogni 900ms per ~15s, su tutti i frame, finché
+// il form non viene compilato e inviato (o non c'è più la finestra).
+function avviaLoginMerck(url, { visibile = false } = {}) {
+  return new Promise((resolve) => {
+    if (merckFinestraLogin && !merckFinestraLogin.isDestroyed()) {
+      if (visibile) merckMostraFinestra();
+      resolve({ ok: true, connesso: merckStato.stato === 'connesso', manuale: merckStato.stato === 'manuale', dettaglio: merckStato.dettaglio, stato: merckStato.stato });
+      return;
+    }
+    const credenziali = merckCredenziali();
+    const mostra = visibile || !credenziali;
+    const win = new BrowserWindow({
+      show: mostra, width: 1180, height: 880, title: 'Accesso al portale Merck', backgroundColor: '#f5f5f7',
+      // backgroundThrottling disattivato: una finestra nascosta non deve rallentare i timer
+      // della pagina (il portale Lightning disegna e verifica la sessione via JavaScript).
+      webPreferences: { session: merckSessione(), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, navigateOnDragDrop: false, backgroundThrottling: false }
+    });
+    merckFinestraLogin = win;
+    win.setMenuBarVisibility(false);
+    merckUltimaDiagnostica = '';
+    merckImpostaStato(credenziali ? 'accesso' : 'manuale',
+      credenziali ? 'Accesso in corso in background…' : 'Nessuna credenziale salvata: accedi a mano nella finestra del portale');
+
+    let tick = 0;
+    if (merckAutofillTimer) clearInterval(merckAutofillTimer);
+    merckAutofillTimer = setInterval(async () => {
+      tick++;
+      try {
+        if (!win || win.isDestroyed()) { clearInterval(merckAutofillTimer); merckAutofillTimer = null; return; }
+        const cred = merckCredenziali();
+        if (!cred) { clearInterval(merckAutofillTimer); merckAutofillTimer = null; return; } // login manuale
+        const esito = await merckProvaAutofill(win, cred);
+        if (esito.submitted) {
+          console.log('[Merck] Login auto-compilato e inviato dopo', tick, 'tentativi');
+          clearInterval(merckAutofillTimer); merckAutofillTimer = null;
+        } else if (tick >= 16) {
+          clearInterval(merckAutofillTimer); merckAutofillTimer = null;
+        }
+      } catch { /* tick successivo */ }
+    }, 900);
+
+    win.webContents.on('did-fail-load', (e, code, desc, vurl, isMainFrame) => {
+      if (!isMainFrame || code === -3) return; // -3 = caricamento annullato (navigazione successiva)
+      merckImpostaStato('errore', 'Impossibile raggiungere il portale: ' + desc);
+      if (merckMonitor) merckMonitor.fine({ connesso: false, dettaglio: 'Impossibile raggiungere il portale: ' + desc });
+    });
+    win.once('closed', () => {
+      if (merckAutofillTimer) { clearInterval(merckAutofillTimer); merckAutofillTimer = null; }
+      const fine = merckMonitor && merckMonitor.fine;
+      merckFermaMonitor();
+      if (fine) fine({ connesso: false, dettaglio: 'Finestra del portale chiusa prima della fine dell\'accesso' });
+      if (merckFinestraLogin === win) merckFinestraLogin = null;
+      // La sessione (cookie) resta valida anche a finestra chiusa: se si era connessi si resta
+      // "connesso"; negli altri casi si torna a "inattivo".
+      if (merckStato.stato !== 'connesso') merckImpostaStato('inattivo', '');
+    });
+    win.loadURL(url).catch(() => {});
+
+    if (!credenziali) {
+      merckAvviaMonitorAccesso(win, null); // aggiorna lo stato quando l'utente completa l'accesso a mano
+      resolve({ ok: true, connesso: false, manuale: true, dettaglio: merckStato.dettaglio, stato: 'manuale' });
+      return;
+    }
+    merckAvviaMonitorAccesso(win, (ris) => resolve({ ok: true, manuale: false, stato: merckStato.stato, ...ris }));
+  });
+}
+
 function registraCanaliMerck() {
   // Credenziali: salvate cifrate (safeStorage), lette solo dal main. La password
   // NON viene mai restituita al renderer — solo user e data di aggiornamento.
@@ -772,43 +940,28 @@ function registraCanaliMerck() {
     return { presente: !!c, user: c ? c.user : '', aggiornataIl: c ? c.aggiornataIl : null };
   });
 
-  // Apre la finestra di login sul portale. L'auto-compilazione NON gira una sola volta al
-  // load: molti portali disegnano il form via JavaScript dopo il caricamento o lo mettono
-  // in un iframe. Polling ogni 900ms per ~15s, su tutti i frame, finché il form non viene
-  // compilato e inviato (o non c'è più la finestra). Senza credenziali salvate: login manuale.
+  // Accesso al portale IN BACKGROUND: la finestra viene creata nascosta e, con le credenziali
+  // salvate, il form si compila e si invia da solo; l'invoke si risolve quando l'esito è noto
+  // (connesso / errore) o subito se serve l'accesso manuale (nessuna credenziale salvata: in quel
+  // caso la finestra viene mostrata, altrimenti non si potrebbe accedere). La finestra si può
+  // mostrare in qualsiasi momento col pulsante "Merck" in alto (merck:mostraFinestra).
   ipcMain.handle('merck:login', (event, urlGrezzo) => {
     const url = validaUrlPortale(urlGrezzo);
     if (!url) return { ok: false, errore: 'URL del portale non valido (deve iniziare con https://)' };
-    if (merckFinestraLogin && !merckFinestraLogin.isDestroyed()) { merckFinestraLogin.focus(); return { ok: true }; }
-    merckFinestraLogin = new BrowserWindow({
-      width: 1180, height: 880, title: 'Accesso al portale Merck', backgroundColor: '#f5f5f7',
-      webPreferences: { session: merckSessione(), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, navigateOnDragDrop: false }
-    });
-    merckFinestraLogin.setMenuBarVisibility(false);
-    let tick = 0;
-    if (merckAutofillTimer) clearInterval(merckAutofillTimer);
-    merckAutofillTimer = setInterval(async () => {
-      tick++;
-      try {
-        if (!merckFinestraLogin || merckFinestraLogin.isDestroyed()) { clearInterval(merckAutofillTimer); merckAutofillTimer = null; return; }
-        const credenziali = merckCredenziali();
-        if (!credenziali) { clearInterval(merckAutofillTimer); merckAutofillTimer = null; return; } // login manuale
-        const esito = await merckProvaAutofill(merckFinestraLogin, credenziali);
-        if (esito.submitted) {
-          console.log('[Merck] Login auto-compilato e inviato dopo', tick, 'tentativi');
-          clearInterval(merckAutofillTimer); merckAutofillTimer = null;
-        } else if (tick >= 16) {
-          clearInterval(merckAutofillTimer); merckAutofillTimer = null;
-        }
-      } catch { /* tick successivo */ }
-    }, 900);
-    merckFinestraLogin.loadURL(url);
-    merckFinestraLogin.once('closed', () => {
-      if (merckAutofillTimer) { clearInterval(merckAutofillTimer); merckAutofillTimer = null; }
-      merckFinestraLogin = null;
-    });
+    return avviaLoginMerck(url, { visibile: false });
+  });
+
+  // Mostra la finestra del portale (quella in background se esiste; altrimenti ne apre una
+  // visibile sul portale: la sessione è condivisa, quindi di norma si è già connessi).
+  ipcMain.handle('merck:mostraFinestra', (event, urlGrezzo) => {
+    if (merckMostraFinestra()) return { ok: true };
+    const url = validaUrlPortale(urlGrezzo);
+    if (!url) return { ok: false, errore: "Imposta prima l'URL del portale Merck nelle Impostazioni." };
+    avviaLoginMerck(url, { visibile: true }); // non si attende l'esito: la finestra è sotto gli occhi dell'utente
     return { ok: true };
   });
+
+  ipcMain.handle('merck:statoCorrente', () => merckStato);
 
   // Scaricamento HTTP semplice (basta per portali classici a tabelle/HTML)
   ipcMain.handle('merck:scarica', async (event, urlGrezzo) => {
@@ -837,7 +990,13 @@ function registraCanaliMerck() {
   });
 
   ipcMain.handle('merck:logout', async () => {
-    try { await merckSessione().clearStorageData(); return { ok: true }; }
+    try {
+      await merckSessione().clearStorageData();
+      // Sessione cancellata: la finestra in background (se c'è) non è più connessa a nulla.
+      if (merckFinestraLogin && !merckFinestraLogin.isDestroyed()) merckFinestraLogin.destroy();
+      merckImpostaStato('inattivo', '');
+      return { ok: true };
+    }
     catch (e) { return { ok: false, errore: e.message || String(e) }; }
   });
 
@@ -941,7 +1100,12 @@ function createWindow() {
   finestraPrincipale = win;
   win.once('ready-to-show', () => win.show());
   win.loadFile('index.html');
-  win.once('closed', () => { finestraPrincipale = null; });
+  win.once('closed', () => {
+    finestraPrincipale = null;
+    // La finestra del portale Merck può restare viva (nascosta) in background: chiudendo
+    // l'app va chiusa anche lei, altrimenti window-all-closed non scatta e il processo resta.
+    if (merckFinestraLogin && !merckFinestraLogin.isDestroyed()) merckFinestraLogin.destroy();
+  });
 }
 
 // Hardening applicato a OGNI webContents dell'app (finestra principale, finestre di

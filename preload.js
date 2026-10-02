@@ -29,6 +29,11 @@ contextBridge.exposeInMainWorld('merckPortal', {
   scarica: (url) => ipcRenderer.invoke('merck:scarica', url),
   scaricaRender: (url) => ipcRenderer.invoke('merck:scaricaRender', url),
   logout: () => ipcRenderer.invoke('merck:logout'),
+  // Accesso in background: login() si risolve a esito noto ({connesso, manuale, dettaglio});
+  // mostraFinestra() porta in primo piano la finestra del portale (o ne apre una visibile).
+  mostraFinestra: (url) => ipcRenderer.invoke('merck:mostraFinestra', url),
+  statoCorrente: () => ipcRenderer.invoke('merck:statoCorrente'),
+  onStato: (callback) => ipcRenderer.on('merck:stato', (event, stato) => callback(stato)),
   salvaCredenziali: (user, password) => ipcRenderer.invoke('merck:salvaCredenziali', user, password),
   credenzialiInfo: () => ipcRenderer.invoke('merck:credenzialiInfo'),
   salvaHtml: (html) => ipcRenderer.invoke('merck:salvaHtml', html),

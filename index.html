@@ -276,6 +276,7 @@
     .btn-sync-nav:hover { background: var(--surface2) !important; border-color: var(--border-strong) !important; }
     .btn-sync-nav.connected { background: #e6f4ea !important; color: #0f7b0f !important; border-color: #a8dab5 !important; }
     .btn-sync-nav.warning { background: #fef7e0 !important; color: #9d5d00 !important; border-color: #f5d78e !important; }
+    .btn-sync-nav.errore { background: #fde8e8 !important; color: #b42318 !important; border-color: #f3b4ae !important; }
     .btn-backup-nav { background: var(--accent-light) !important; color: var(--accent) !important; border-color: #c4d9f2 !important; }
     .btn-backup-nav:hover { background: #d4e5fc !important; }
 
@@ -930,6 +931,7 @@
   <button data-section="inventario" onclick="showSection('inventario')">📋 Inventario</button>
   <button data-section="bolle" onclick="showSection('bolle')">📄 Bolle</button>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+    <button id="btnMerckNav" class="btn-sync-nav" onclick="merckMostraFinestra()" title="Mostra la finestra del portale Merck" style="display:none;">🌐 Merck</button>
     <button id="navSyncBtn" class="btn-sync-nav" onclick="gestisciSyncNav()" title="Sincronizzazione Cloud">☁️ Cloud</button>
     <button id="navBackupBtn" class="btn-sync-nav btn-backup-nav" onclick="eseguiBackup()" title="Scarica subito un backup JSON">💾 Backup</button>
     <button id="btnColleghi" class="btn-sync-nav" onclick="apriColleghi()" title="Archivi colleghi" style="display:none;">👥 Colleghi</button>
@@ -3742,7 +3744,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.32 • 2 ott 2026';
+const APP_VERSION = '2.10.33 • 2 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4720,6 +4722,9 @@ window.addEventListener('beforeunload', () => {
 
   // Stato della card "Archivio locale" (cartella dati + backups/)
   aggiornaInfoArchivio();
+
+  // Pulsante "Merck" in alto: stato dell'accesso al portale e apertura della sua finestra
+  try { merckInizializzaPulsanteNav(); } catch (e) { console.warn('Pulsante Merck non inizializzato:', e); }
 
   // Quando la pagina viene nascosta (chiusura tab, switch app, standby) forziamo la
   // persistenza dello stato corrente: prima un salvataggio sulla cartella (più affidabile
@@ -6109,6 +6114,7 @@ function _renderAnteprimaVerbaleIframe() {
     .btn-sync-nav:hover { background: rgba(0, 0, 0, 0.08) !important; color: var(--text) !important; }
     .btn-sync-nav.connected { background: rgba(52, 199, 89, 0.12) !important; color: #34c759 !important; }
     .btn-sync-nav.warning { background: rgba(255, 159, 10, 0.12) !important; color: #ff9f0a !important; }
+    .btn-sync-nav.errore { background: rgba(255, 59, 48, 0.12) !important; color: #ff3b30 !important; }
     .btn-backup-nav { background: rgba(0, 122, 255, 0.1) !important; color: var(--accent) !important; }
     .btn-backup-nav:hover { background: rgba(0, 122, 255, 0.16) !important; }
 
@@ -10084,16 +10090,74 @@ function fmtOraAdesso() {
   return new Date().toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+// Accesso al portale IN BACKGROUND: la finestra resta nascosta e, con le credenziali salvate,
+// il form si compila e si invia da solo. Si attende l'esito (connesso / non riuscito); se non ci
+// sono credenziali salvate la finestra viene mostrata per l'accesso a mano. In ogni momento il
+// pulsante "Merck" in alto mostra la finestra e lo stato dell'accesso.
 async function merckApriLogin() {
   const url = merckUrlSalvato();
-  if (!url) { mostraToast('Imposta prima l\'URL del portale Merck.', 'warning'); return; }
-  if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
+  if (!url) { mostraToast('Imposta prima l\'URL del portale Merck.', 'warning'); return null; }
+  if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return null; }
   _merckAttivaDiagnostica();
   const diagEl = document.getElementById('merckDiagnostica');
   if (diagEl) { diagEl.style.display = 'none'; diagEl.textContent = ''; }
+  mostraToast('🌐 Accesso al portale Merck in background…', 'info');
   const res = await window.merckPortal.login(url).catch(e => ({ ok: false, errore: e.message || String(e) }));
-  if (res.ok) mostraToast('Accedi al portale nella finestra aperta (con credenziali salvate il form viene compilato da solo): la sessione resterà attiva. Segui gli aggiornamenti qui sotto nella card.', 'info');
-  else mostraToast('❌ ' + (res.errore || 'Impossibile aprire il portale'), 'danger');
+  if (!res.ok) mostraToast('❌ ' + (res.errore || 'Impossibile aprire il portale'), 'danger');
+  else if (res.manuale) mostraToast('Nessuna credenziale salvata: ho aperto la finestra del portale per accedere a mano.', 'info');
+  else if (res.connesso) mostraToast('✅ Connesso al portale Merck (in background).', 'success');
+  else mostraToast(`⚠️ Accesso in background non riuscito: ${res.dettaglio || 'esito sconosciuto'}\nPremi "🌐 Merck" in alto per aprire la finestra e accedere a mano.`, 'warning');
+  return res;
+}
+
+// Mostra la finestra del portale Merck (quella che lavora in background, o una nuova sul portale).
+async function merckMostraFinestra() {
+  if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
+  const url = merckUrlSalvato();
+  const res = await window.merckPortal.mostraFinestra(url || '').catch(e => ({ ok: false, errore: e.message || String(e) }));
+  if (!res.ok) {
+    mostraToast('❌ ' + (res.errore || 'Impossibile mostrare la finestra del portale'), 'danger');
+    if (!url) showSection('impostazioni');
+  }
+}
+
+// Dopo una sessione scaduta: accesso in background e secondo tentativo di scaricamento.
+// Ritorna il nuovo risultato di merckScaricaElencoGrezzo, oppure null se non si è riusciti.
+async function _merckRiproviDopoLogin(url) {
+  mostraToast('🔐 Sessione del portale scaduta: accedo in background…', 'info');
+  const l = await merckApriLogin();
+  if (!l || !l.connesso) return null;
+  const r = await merckScaricaElencoGrezzo(url);
+  if (!r.ok) { mostraToast('❌ ' + r.errore, 'danger'); return null; }
+  if (r.sembraLogin) {
+    mostraToast('🔐 Il portale chiede ancora l\'accesso: premi "🌐 Merck" in alto per controllare la finestra.', 'warning');
+    return null;
+  }
+  return r;
+}
+
+// Pulsante "Merck" nella barra in alto: colore ed etichetta seguono lo stato dell'accesso.
+const _MERCK_STATI_NAV = {
+  inattivo: { testo: '🌐 Merck',          classe: '' },
+  accesso:  { testo: '🟡 Merck…',         classe: 'warning' },
+  connesso: { testo: '🟢 Merck',          classe: 'connected' },
+  manuale:  { testo: '🟠 Merck: accedi',  classe: 'warning' },
+  errore:   { testo: '🔴 Merck',          classe: 'errore' }
+};
+function merckAggiornaPulsanteNav(s) {
+  const btn = document.getElementById('btnMerckNav');
+  if (!btn) return;
+  const def = _MERCK_STATI_NAV[s && s.stato] || _MERCK_STATI_NAV.inattivo;
+  btn.style.display = '';
+  btn.textContent = def.testo;
+  btn.className = 'btn-sync-nav' + (def.classe ? ' ' + def.classe : '');
+  btn.title = ((s && s.dettaglio) ? s.dettaglio + ' — ' : '') + 'clicca per mostrare la finestra del portale Merck';
+}
+async function merckInizializzaPulsanteNav() {
+  if (!window.merckPortal || typeof window.merckPortal.statoCorrente !== 'function') return; // solo app desktop
+  merckAggiornaPulsanteNav(null);
+  if (typeof window.merckPortal.onStato === 'function') window.merckPortal.onStato(merckAggiornaPulsanteNav);
+  try { merckAggiornaPulsanteNav(await window.merckPortal.statoCorrente()); } catch (e) {}
 }
 
 async function merckLogout() {
@@ -10312,12 +10376,11 @@ async function scaricaChiamateMerck() {
   if (!window.merckPortal) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
   mostraToast('⏳ Scaricamento dal portale Merck…', 'info');
 
-  const r = await merckScaricaElencoGrezzo(url);
+  let r = await merckScaricaElencoGrezzo(url);
   if (!r.ok) { mostraToast('❌ ' + r.errore, 'danger'); return; }
   if (r.sembraLogin) {
-    mostraToast('🔐 Sessione del portale scaduta o assente: apro il portale per l\'accesso.', 'warning');
-    merckApriLogin();
-    return;
+    r = await _merckRiproviDopoLogin(url); // accesso in background + nuovo tentativo
+    if (!r) return;
   }
   _merckUltimoHtml = r.html;
 
@@ -10338,12 +10401,11 @@ async function merckCorreggiNumeriChiamata() {
   if (!confirm('Riscarica l\'elenco dal portale Merck e corregge il numero WO sugli appuntamenti/interventi già importati che risultano sbagliati, completa il "Tipo intervento" dove manca e ritenta l\'abbinamento cliente per le chiamate rimaste "da assegnare".\n\nNon vengono creati né cancellati appuntamenti: solo i campi vengono corretti/completati dove serve.\n\nProcedere?')) return;
 
   mostraToast('⏳ Scaricamento elenco dal portale per il confronto…', 'info');
-  const r = await merckScaricaElencoGrezzo(url);
+  let r = await merckScaricaElencoGrezzo(url);
   if (!r.ok) { mostraToast('❌ ' + r.errore, 'danger'); return; }
   if (r.sembraLogin) {
-    mostraToast('🔐 Sessione del portale scaduta o assente: apro il portale per l\'accesso.', 'warning');
-    merckApriLogin();
-    return;
+    r = await _merckRiproviDopoLogin(url); // accesso in background + nuovo tentativo
+    if (!r) return;
   }
   if (!r.chiamate.length) { mostraToast('Nessuna chiamata leggibile nella pagina scaricata.', 'warning'); return; }
 
