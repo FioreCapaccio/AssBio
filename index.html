@@ -3744,7 +3744,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.34 • 2 ott 2026';
+const APP_VERSION = '2.10.35 • 4 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -10393,9 +10393,89 @@ async function scaricaChiamateMerck() {
   }
   _merckUltimoHtml = r.html;
 
+  // Prima della deduplica: una chiamata già in agenda ma spostata a un'altra data sul portale
+  // va riallineata alla nuova data (altrimenti verrebbe solo scartata come "già presente").
+  const allineamento = merckAllineaDateSpostate(r.chiamate);
+  if (allineamento.spostati.length) {
+    DB.save();
+    DB.auditLog('update', 'appuntamento', null, `Spostati ${allineamento.spostati.length} appuntamenti alla nuova data del portale Merck: ` +
+      allineamento.spostati.map(x => `${x.numero} ${x.da}→${x.a}`).join(', '));
+    renderAll();
+    mostraToast(`📅 ${allineamento.spostati.length} appuntament${allineamento.spostati.length === 1 ? 'o spostato' : 'i spostati'} alla nuova data del portale.`, 'success');
+  } else if (allineamento.riferimentiAggiornati) {
+    DB.save();
+  }
+
   // Deduplica: solo le chiamate NON già presenti arrivano all'anteprima
   const nuove = r.chiamate.filter(c => !_merckChiamataGiaPresente(c.numeroChiamata));
-  await _merckApriPreview(r.chiamate, nuove);
+  await _merckApriPreview(r.chiamate, nuove, allineamento);
+}
+
+// Una chiamata del portale con lo STESSO numero (WO) di un appuntamento già in agenda ma con
+// un'altra data è stata spostata sul portale: l'appuntamento viene spostato alla nuova data.
+// Per non litigare con le modifiche fatte a mano in app, si confronta la data del portale con
+// l'ULTIMA data vista sul portale (dataPortale) e non con quella locale: un appuntamento
+// spostato a mano resta dov'è finché il portale non cambia a sua volta la data. Per gli
+// appuntamenti importati prima di questa funzione (senza dataPortale) vale la data locale.
+// Non si toccano — e vengono segnalati — gli appuntamenti già completati/annullati, già
+// convertiti in intervento, o con più numeri di chiamata diversi (spostarli sposterebbe anche
+// le altre chiamate).
+function merckAllineaDateSpostate(chiamate) {
+  const risultato = { spostati: [], nonSpostati: [], riferimentiAggiornati: 0 };
+  const dalPortale = new Map();
+  const ambigui = new Set(); // stesso WO con date diverse sul portale: non si sa quale vale
+  (chiamate || []).forEach(c => {
+    const n = _merckNormNum(c.numeroChiamata);
+    if (!n || !c.data) return;
+    const gia = dalPortale.get(n);
+    if (gia && gia.data !== c.data) ambigui.add(n);
+    else if (!gia) dalPortale.set(n, c);
+  });
+
+  (DB.appuntamenti || []).forEach(a => {
+    if (!a) return;
+    const strumenti = _elencoStrumentiAppuntamento(a);
+    const numeri = new Set([_merckNormNum(a.chiamata), ...strumenti.map(s => _merckNormNum(s.numeroChiamata))].filter(Boolean));
+    const corrispondenti = [...numeri].filter(n => dalPortale.has(n) && !ambigui.has(n));
+    if (!corrispondenti.length) return;
+    const nomeCliente = () => { const cl = DB.clienti.find(x => x.id === a.clienteId); return cl ? cl.ragione : (a.clienteDatiPortale?.ragione || ''); };
+
+    if (numeri.size > 1) {
+      // più chiamate nello stesso appuntamento: si segnala solo se una di esse è davvero spostata
+      const spostata = corrispondenti.some(n => dalPortale.get(n).data !== (a.dataPortale || a.data));
+      if (spostata) risultato.nonSpostati.push({ numero: [...numeri].join(' / '), cliente: nomeCliente(), motivo: 'più chiamate nello stesso appuntamento' });
+      return;
+    }
+    const c = dalPortale.get(corrispondenti[0]);
+    const riferimento = a.dataPortale || a.data;
+    if (c.data === riferimento) {
+      if (a.dataPortale !== c.data) { a.dataPortale = c.data; risultato.riferimentiAggiornati++; }
+      return; // il portale non ha cambiato data
+    }
+    if (a.data === c.data) { a.dataPortale = c.data; risultato.riferimentiAggiornati++; return; } // già alla data giusta
+    const convertito = strumenti.some(s => s.interventoId);
+    if (convertito || a.stato === 'Completato' || a.stato === 'Annullato') {
+      risultato.nonSpostati.push({ numero: c.numeroChiamata, cliente: nomeCliente(), motivo: convertito ? 'già convertito in intervento' : 'appuntamento ' + a.stato.toLowerCase() });
+      return;
+    }
+    risultato.spostati.push({ numero: c.numeroChiamata, cliente: nomeCliente(), da: a.data, a: c.data });
+    a.data = c.data;
+    a.dataPortale = c.data;
+  });
+  return risultato;
+}
+
+// Riquadro riepilogativo degli spostamenti, mostrato nella finestra dell'importazione.
+function _merckHtmlSpostamenti(all) {
+  if (!all || (!all.spostati.length && !all.nonSpostati.length)) return '';
+  const riga = x => `<li><strong>${escHtml(x.numero)}</strong>${x.cliente ? ' · ' + escHtml(trunc(x.cliente, 34)) : ''}`;
+  const spostati = all.spostati.length ? `
+    <div style="margin-bottom:${all.nonSpostati.length ? '8px' : '0'};">📅 <strong>${all.spostati.length} appuntament${all.spostati.length === 1 ? 'o spostato' : 'i spostati'}</strong> alla nuova data del portale:
+      <ul style="margin:4px 0 0 18px;padding:0;">${all.spostati.map(x => riga(x) + `: ${fmtDate(x.da)} → <strong>${fmtDate(x.a)}</strong></li>`).join('')}</ul></div>` : '';
+  const non = all.nonSpostati.length ? `
+    <div>⚠️ <strong>Data cambiata sul portale ma NON spostati</strong>:
+      <ul style="margin:4px 0 0 18px;padding:0;">${all.nonSpostati.map(x => riga(x) + ` — ${escHtml(x.motivo)}</li>`).join('')}</ul></div>` : '';
+  return `<div style="margin-bottom:12px;padding:8px 12px;border-radius:8px;background:rgba(147,51,234,0.08);border-left:3px solid #9333ea;font-size:0.82rem;text-align:left;">${spostati}${non}</div>`;
 }
 
 // Correzione in blocco dei numeri WO salvati male dal bug "Work Order Type" scambiato per il
@@ -10530,11 +10610,13 @@ async function merckSalvaHtmlLoginDebug() {
   else if (res.errore) mostraToast('❌ ' + res.errore, 'warning');
 }
 
-async function _merckApriPreview(chiamate, nuove) {
+let _merckAvvisoSpostamenti = '';
+async function _merckApriPreview(chiamate, nuove, allineamento) {
   _merckChiamate = nuove.map(c => ({ ...c, _selezionata: true }));
+  _merckAvvisoSpostamenti = _merckHtmlSpostamenti(allineamento);
   openModal('modalMerckChiamate');
   if (!_merckChiamate.length) {
-    document.getElementById('merckChiamateBody').innerHTML = `
+    document.getElementById('merckChiamateBody').innerHTML = _merckAvvisoSpostamenti + `
       <div class="empty-state" style="padding:30px 20px;">
         <div style="font-size:2rem;">${chiamate.length ? '✅' : '🤔'}</div>
         <p style="margin:10px 0;">${chiamate.length
@@ -10566,7 +10648,7 @@ function _merckRenderPreview() {
       <td>${c.statoPortale ? escHtml(trunc(c.statoPortale, 20)) + ` → ${_merckMappaStato(c.statoPortale)}` : _merckMappaStato(c.statoPortale)}</td>
     </tr>`;
   }).join('');
-  body.innerHTML = `
+  body.innerHTML = _merckAvvisoSpostamenti + `
     <p style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px;">Le righe evidenziate in giallo hanno la matricola non riconosciuta nell'archivio: l'appuntamento verrà creato con cliente <em>da assegnare</em>. Deseleziona eventuali righe da non importare.</p>
     <div style="max-height:48vh; overflow:auto;">
       <table class="table" style="width:100%; border-collapse:collapse; font-size:0.85rem;">
@@ -10630,6 +10712,7 @@ async function confermaCreaAppuntamentiMerck() {
       note: 'Da portale Merck' + (c.clienteId ? '' : ' — cliente da assegnare'),
       origine: 'merck',
       chiamata: c.numeroChiamata || '',
+      dataPortale: c.data || '',
       createdAt: new Date().toISOString()
     };
     // Senza corrispondenza in archivio: il nome e i dati letti dal portale NON vanno persi
