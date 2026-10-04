@@ -1009,13 +1009,6 @@
         <div class="stat-icon blue">🏭</div>
       </div>
 
-      <div class="stat-card" id="card-fatturato" style="cursor:pointer;" title="Clicca per vedere il fatturato stimato" onclick="mostraFatturato()">
-        <div class="stat-info">
-          <div class="stat-val" id="stat-fatturato" style="color:var(--success);font-size:1rem;opacity:0.45;">👁️ Mostra</div>
-          <div class="stat-label">Fatturato stimato</div>
-        </div>
-        <div class="stat-icon green">💰</div>
-      </div>
     </div>
 
     <div id="dash-alerts"></div>
@@ -3744,7 +3737,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.35 • 4 ott 2026';
+const APP_VERSION = '2.10.36 • 4 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -5811,19 +5804,6 @@ function filtraInterventiByCond(cond) {
   });
 }
 
-function mostraFatturato() {
-  const el = document.getElementById('stat-fatturato');
-  const card = document.getElementById('card-fatturato');
-  if (!el || !card) return;
-  const tot = DB.interventi.reduce((acc, i) => acc + (parseFloat(i.importoTotale) || 0), 0);
-  el.textContent = Math.round(tot).toLocaleString('it-IT') + ' €';
-  el.style.opacity = '1';
-  el.style.fontSize = '';
-  el.dataset.visibile = '1';
-  card.title = 'Vai agli interventi';
-  card.onclick = () => showSection('interventi');
-}
-
 // Firme disponibili per il verbale di un intervento: quella disegnata direttamente per
 // QUESTO intervento (se presente) più quelle salvate in archivio sulla scheda cliente
 // (galleria "cliente.firme[]", max 3, alimentata da apriFirmaCliente/salvaFirmaGenerica).
@@ -7854,6 +7834,25 @@ function resetForm(fields) {
 }
 
 // ======================== DASHBOARD ========================
+// Sfondo tenue per un appuntamento in base ai giorni che mancano ad oggi: verde con data
+// lontana (14 giorni o più), poi giallo e arancio avvicinandosi, rosso quando è oggi o la data
+// è passata. Tonalità continua (HSL: 0 = rosso, 120 = verde) con trasparenza alta, così il
+// testo resta sempre leggibile sia con tema chiaro sia scuro.
+function _coloreVicinanzaAppuntamento(data, oggi) {
+  const GIORNI_VERDE = 14, ALFA = 0.16;
+  const [y, m, d] = String(data || '').split('T')[0].split('-').map(Number);
+  const [oy, om, od] = String(oggi || today()).split('-').map(Number);
+  if (!y || !m || !d) return { giorni: 0, sfondo: 'transparent', testo: 'Data non valida' };
+  const giorni = Math.round((Date.UTC(y, m - 1, d) - Date.UTC(oy, om - 1, od)) / 86400000);
+  const t = Math.max(0, Math.min(giorni, GIORNI_VERDE)) / GIORNI_VERDE;
+  const tinta = Math.round(120 * t);
+  const testo = giorni < 0 ? `scaduto da ${-giorni} giorn${giorni === -1 ? 'o' : 'i'}, non eseguito`
+    : giorni === 0 ? 'oggi'
+    : giorni === 1 ? 'domani'
+    : `tra ${giorni} giorni`;
+  return { giorni, sfondo: `hsla(${tinta}, 75%, 48%, ${ALFA})`, testo };
+}
+
 function renderDashboard() {
   const aperti = (DB.interventi || []).filter(i => i && i.stato !== 'Chiuso' && i.stato !== 'Annullato').length;
   const chiusi = (DB.interventi || []).filter(i => i && i.stato === 'Chiuso').length;
@@ -7870,15 +7869,6 @@ function renderDashboard() {
   setT('stat-ricambi', (DB.ricambi || []).length);
   setT('stat-fornitori', (DB.fornitori || []).length);
 
-  // Aggiorna fatturato solo se già rivelato dall'utente
-  const elFatt = document.getElementById('stat-fatturato');
-  if (elFatt && elFatt.dataset.visibile === '1') {
-    // Esclude gli interventi Annullati: un annullato con tariffe fornitore impostate
-    // gonfiava il totale anche se non è mai stato un lavoro fatturabile.
-    const tot = (DB.interventi || []).reduce((acc, i) => (i && i.stato === 'Annullato') ? acc : acc + (parseFloat(i.importoTotale) || 0), 0);
-    elFatt.textContent = Math.round(tot).toLocaleString('it-IT') + ' €';
-  }
-
   // Alerts
   const alerts = document.getElementById('dash-alerts');
   if (alerts) {
@@ -7891,11 +7881,20 @@ function renderDashboard() {
     }
   }
 
-  // Prossimi appuntamenti
-  const prossimi = [...(DB.appuntamenti || [])]
-    .filter(a => a && a.stato !== 'Annullato' && a.stato !== 'Completato' && (a.data||'') >= oggiDash)
-    .sort((a,b) => (a.data||'').localeCompare(b.data||'') || (a.oraInizio||'').localeCompare(b.oraInizio||''))
-    .slice(0, 6);
+  // Prossimi appuntamenti. Ogni riga ha uno sfondo tenue che va dal verde (data lontana) al
+  // rosso (oggi, o data passata ma appuntamento non eseguito): vedi _coloreVicinanzaAppuntamento.
+  // Gli appuntamenti passati e non eseguiti (né completati né annullati) restano in elenco
+  // finché non vengono chiusi, così non si dimenticano; sono mostrati per primi, al massimo
+  // MAX_SCADUTI, con il numero degli altri in coda, perché un arretrato non copra i prossimi.
+  const MAX_RIGHE = 8, MAX_SCADUTI = 3;
+  const appDaFare = [...(DB.appuntamenti || [])]
+    .filter(a => a && a.stato !== 'Annullato' && a.stato !== 'Completato')
+    .sort((a,b) => (a.data||'').localeCompare(b.data||'') || (a.oraInizio||'').localeCompare(b.oraInizio||''));
+  const scaduti = appDaFare.filter(a => (a.data||'') < oggiDash);
+  const futuri = appDaFare.filter(a => (a.data||'') >= oggiDash);
+  const scadutiMostrati = scaduti.slice(-MAX_SCADUTI); // i più recenti tra quelli scaduti
+  const prossimi = [...scadutiMostrati, ...futuri].slice(0, MAX_RIGHE);
+  const scadutiNascosti = scaduti.length - scadutiMostrati.length;
   const dashApp = document.getElementById('dash-appuntamenti');
   if (dashApp) {
     if (prossimi.length === 0) { dashApp.innerHTML = '<div style="color:var(--text-muted);font-size:0.85rem;padding:16px 0;">Nessun appuntamento in programma</div>'; }
@@ -7903,13 +7902,17 @@ function renderDashboard() {
       const cl = (DB.clienti || []).find(c => c && c.id === a.clienteId);
       const orario = a.oraInizio ? ' · ' + a.oraInizio : '';
       const strumentiTesto = _elencoStrumentiAppuntamento(a).map(s => s.modello).join(', ') || '—';
-      return `<div class="list-item-dash" style="cursor:pointer;" onclick="showSection('appuntamenti'); openAppuntamentoModal(${a.id})">
+      const vic = _coloreVicinanzaAppuntamento(a.data, oggiDash);
+      const nomeCliente = cl ? cl.ragione : (a.clienteDatiPortale?.ragione || '—');
+      return `<div class="list-item-dash" style="cursor:pointer;background:${vic.sfondo};padding:8px 10px;border-radius:6px;margin-bottom:3px;border-bottom:none;" title="${escAttr(vic.testo)}" onclick="showSection('appuntamenti'); openAppuntamentoModal(${a.id})">
         <div class="list-item-left">
-          <strong>${escHtml(fmtDateShort(a.data))}${orario} — ${cl ? escHtml(cl.ragione) : '—'}</strong>
-          <span>${escHtml(strumentiTesto)}${a.tecnico ? ' · ' + escHtml(a.tecnico) : ''}</span>
+          <strong>${escHtml(fmtDateShort(a.data))}${orario} — ${escHtml(nomeCliente)}</strong>
+          <span>${escHtml(strumentiTesto)}${a.tecnico ? ' · ' + escHtml(a.tecnico) : ''}${vic.giorni < 0 ? ' · ⏰ ' + escHtml(vic.testo) : ''}</span>
         </div>
       </div>`;
-    }).join('');
+    }).join('') + (scadutiNascosti > 0
+      ? `<div style="font-size:0.75rem;color:var(--text-muted);padding:4px 10px;cursor:pointer;" onclick="showSection('appuntamenti')">… e altri ${scadutiNascosti} scadut${scadutiNascosti === 1 ? 'o' : 'i'} non eseguit${scadutiNascosti === 1 ? 'o' : 'i'} — vedi tutti</div>`
+      : '');
   }
 
   // Ultimi interventi
