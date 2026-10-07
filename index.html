@@ -3733,11 +3733,27 @@
   };
   window.confirm = (msg) => { const r = confirmNativo(msg); ripristina(); return r; };
   window.alert = (msg) => { alertNativo(msg); ripristina(); };
+
+  // Rimedio generale, qualunque ne sia la causa (dialoghi, chiusura di un'altra finestra,
+  // ricaricamento della pagina): se si clicca in un campo di testo ma la pagina NON ha il
+  // focus di tastiera (document.hasFocus() falso: il cursore non compare e i tasti vanno persi),
+  // si chiede al processo principale di riassegnarlo e si rimette il cursore nel campo.
+  let recuperoInCorso = false;
+  const campoDiTesto = (el) => !!el && el.matches && el.matches(
+    'input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not([type=file]):not([type=range]):not([type=color]):not([type=hidden]), textarea, [contenteditable=""], [contenteditable="true"]');
+  document.addEventListener('mousedown', (e) => {
+    const campo = e.target;
+    if (recuperoInCorso || !campoDiTesto(campo) || document.hasFocus()) return;
+    recuperoInCorso = true;
+    Promise.resolve(window.ivdFS && window.ivdFS.ripristinaFocus ? window.ivdFS.ripristinaFocus() : null)
+      .catch(() => {})
+      .finally(() => setTimeout(() => { try { campo.focus(); } catch (err) {} recuperoInCorso = false; }, 80));
+  }, true);
 })();
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.36 • 4 ott 2026';
+const APP_VERSION = '2.10.37 • 7 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -8631,15 +8647,28 @@ function _isFornitoreIntelsint(fornitoreId) {
 function _prossimoNumeroIntelsint() {
   const annoCorrente = String(new Date().getFullYear()).slice(-2);
   const re = /^(\d+)-(\d{2})$/;
+  const usati = new Set();
   let maxNum = 0;
   DB.interventi.forEach(iv => {
-    const m = typeof iv.numero === 'string' ? iv.numero.match(re) : null;
+    const numero = typeof iv.numero === 'string' ? iv.numero.trim() : '';
+    if (numero) usati.add(numero);
+    const m = numero.match(re);
     if (!m || m[2] !== annoCorrente) return;
-    if (!_isFornitoreIntelsint(iv.fornitoreId)) return;
+    // Fanno parte della serie INTELSINT gli interventi del fornitore INTELSINT E quelli SENZA
+    // alcun fornitore con un numero nel suo formato "NN-AA" (es. creati da appuntamento quando
+    // il fornitore non veniva ancora impostato, o numero scritto a mano): prima venivano
+    // ignorati, quindi dopo di loro si riproponeva lo stesso numero ("22-26" già usato → duplicato).
+    // Restano fuori solo gli interventi di un ALTRO fornitore esplicito.
+    if (iv.fornitoreId && !_isFornitoreIntelsint(iv.fornitoreId)) return;
     const n = parseInt(m[1], 10);
     if (n > maxNum) maxNum = n;
   });
-  return String(maxNum + 1).padStart(2, '0') + '-' + annoCorrente;
+  // Rete di sicurezza: mai proporre un numero già usato da QUALSIASI intervento (il salvataggio
+  // rifiuta i duplicati), anche se la serie ha "buchi" o numeri di altri fornitori nello stesso formato.
+  let n = maxNum + 1;
+  let candidato;
+  do { candidato = String(n++).padStart(2, '0') + '-' + annoCorrente; } while (usati.has(candidato));
+  return candidato;
 }
 
 function aggiornaNumeroInterventoPerFornitore() {

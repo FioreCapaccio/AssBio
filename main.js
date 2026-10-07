@@ -65,6 +65,37 @@ async function assicuraCartelle() {
   await scriviConTimeout(fsp.mkdir(cartellaBackupAttuale(), { recursive: true }));
 }
 
+// ============================================================================
+// FOCUS DI TASTIERA (Windows)
+// Su Windows la finestra può restare attiva ma con la pagina SENZA focus di tastiera: i campi
+// di testo non mostrano il cursore e non accettano input ("campi fantasma"), mentre i menu a
+// tendina — pilotati dal solo mouse — continuano a funzionare. Cause note di Electron: dialoghi
+// nativi (confirm/alert del renderer, dialog.show* senza finestra genitore), chiusura di
+// un'altra finestra dell'app, ricaricamento della pagina. Qui sta il rimedio comune: su Windows
+// il solo webContents.focus() non basta quando la finestra "risulta" già attiva, quindi si
+// forza un ciclo blur → focus che fa riassegnare il focus di tastiera alla pagina.
+// ============================================================================
+function ripristinaFocusFinestra(w) {
+  if (!w || w.isDestroyed()) return false;
+  if (w.isMinimized()) w.restore();
+  if (process.platform === 'win32' && w.isFocused()) w.blur();
+  w.focus();
+  w.webContents.focus();
+  return true;
+}
+
+// Dialoghi nativi di apertura/salvataggio agganciati alla finestra principale (senza genitore
+// Windows li gestisce come finestre indipendenti e al ritorno non restituisce il focus alla
+// pagina) e con ripristino del focus a dialogo chiuso.
+async function dialogAgganciato(metodo, opzioni) {
+  const genitore = (finestraPrincipale && !finestraPrincipale.isDestroyed()) ? finestraPrincipale : null;
+  try {
+    return genitore ? await dialog[metodo](genitore, opzioni) : await dialog[metodo](opzioni);
+  } finally {
+    ripristinaFocusFinestra(genitore);
+  }
+}
+
 // Coda di scrittura: le richieste IPC arrivano in ordine e vengono eseguite una alla volta.
 let _writeQueue = Promise.resolve();
 function inCoda(fn) {
@@ -138,11 +169,7 @@ function registraCanaliArchivio() {
   // tastiera: i campi sembrano normali ma non accettano più la digitazione ("campi bloccati")
   // finché non si cambia finestra. Il renderer chiama questo canale subito dopo ogni dialogo.
   ipcMain.handle('finestra:ripristinaFocus', (event) => {
-    const w = BrowserWindow.fromWebContents(event.sender);
-    if (!w || w.isDestroyed()) return false;
-    if (!w.isFocused()) w.focus();
-    w.webContents.focus();
-    return true;
+    return ripristinaFocusFinestra(BrowserWindow.fromWebContents(event.sender));
   });
 
   ipcMain.handle('archivio:info', async () => {
@@ -216,7 +243,7 @@ function registraCanaliArchivio() {
   // Cambia la posizione dell'archivio per le prossime sessioni. NON copia i dati:
   // la copia è voluta separata (archivio:sposta) perché è un'operazione più rischiosa.
   ipcMain.handle('archivio:scegliCartella', async () => {
-    const res = await dialog.showOpenDialog({
+    const res = await dialogAgganciato('showOpenDialog', {
       title: 'Scegli la cartella dell\'archivio Assistenza Tecnica IVD',
       properties: ['openDirectory', 'createDirectory']
     });
@@ -264,7 +291,7 @@ function registraCanaliArchivio() {
 
   // Sposta l'archivio dati corrente nella cartella scelta, poi usa quella.
   ipcMain.handle('archivio:sposta', async () => {
-    const res = await dialog.showOpenDialog({
+    const res = await dialogAgganciato('showOpenDialog', {
       title: 'Sposta l\'archivio in una nuova cartella',
       properties: ['openDirectory', 'createDirectory']
     });
@@ -872,6 +899,9 @@ function avviaLoginMerck(url, { visibile = false } = {}) {
     });
     merckFinestraLogin = win;
     win.setMenuBarVisibility(false);
+    let eraVisibile = mostra;
+    win.on('show', () => { eraVisibile = true; });
+    win.on('hide', () => { eraVisibile = false; });
     merckUltimaDiagnostica = '';
     merckImpostaStato(credenziali ? 'accesso' : 'manuale',
       credenziali ? 'Accesso in corso in background…' : 'Nessuna credenziale salvata: accedi a mano nella finestra del portale');
@@ -905,6 +935,10 @@ function avviaLoginMerck(url, { visibile = false } = {}) {
       merckFermaMonitor();
       if (fine) fine({ connesso: false, dettaglio: 'Finestra del portale chiusa prima della fine dell\'accesso' });
       if (merckFinestraLogin === win) merckFinestraLogin = null;
+      // Chiusa una finestra dell'app che l'utente stava USANDO, su Windows il focus di tastiera
+      // non torna da solo alla finestra principale: lo si restituisce esplicitamente. Non si fa
+      // se la finestra era nascosta (accesso in background): non deve rubare il focus a nessuno.
+      if (eraVisibile && finestraPrincipale && !finestraPrincipale.isDestroyed()) ripristinaFocusFinestra(finestraPrincipale);
       // La sessione (cookie) resta valida anche a finestra chiusa: se si era connessi si resta
       // "connesso"; negli altri casi si torna a "inattivo".
       if (merckStato.stato !== 'connesso') merckImpostaStato('inattivo', '');
@@ -1003,7 +1037,7 @@ function registraCanaliMerck() {
   // Debug: salva l'HTML scaricato per calibrare il parser sul portale reale
   ipcMain.handle('merck:salvaHtml', async (event, html) => {
     if (typeof html !== 'string' || !html) return { ok: false, errore: 'Nessun HTML da salvare' };
-    const res = await dialog.showSaveDialog({ title: "Salva HTML del portale (per calibrare l'estrazione)", defaultPath: 'merck-pagina.html' });
+    const res = await dialogAgganciato('showSaveDialog', { title: "Salva HTML del portale (per calibrare l'estrazione)", defaultPath: 'merck-pagina.html' });
     if (res.canceled || !res.filePath) return { ok: false };
     await fsp.writeFile(res.filePath, html, 'utf8');
     return { ok: true, percorso: res.filePath };
@@ -1019,7 +1053,7 @@ function registraCanaliMerck() {
     }
     const testo = await merckFinestraLogin.webContents.executeJavaScript(MERCK_SERIALIZZA_RADICI, true).catch((e) => null);
     if (!testo) return { ok: false, errore: 'Impossibile leggere il contenuto della pagina.' };
-    const res = await dialog.showSaveDialog({ title: "Salva struttura pagina di login (per calibrare l'autofill)", defaultPath: 'merck-login.html' });
+    const res = await dialogAgganciato('showSaveDialog', { title: "Salva struttura pagina di login (per calibrare l'autofill)", defaultPath: 'merck-login.html' });
     if (res.canceled || !res.filePath) return { ok: false };
     await fsp.writeFile(res.filePath, testo, 'utf8');
     return { ok: true, percorso: res.filePath };
@@ -1099,6 +1133,11 @@ function createWindow() {
 
   finestraPrincipale = win;
   win.once('ready-to-show', () => win.show());
+  // Ogni volta che la finestra viene attivata (anche tornando da un'altra finestra dell'app o
+  // da un altro programma) il focus di tastiera va alla pagina; idem dopo ogni (ri)caricamento,
+  // altrimenti su Windows i campi di testo possono restare senza cursore (vedi sopra).
+  win.on('focus', () => { if (!win.isDestroyed()) win.webContents.focus(); });
+  win.webContents.on('did-finish-load', () => { if (!win.isDestroyed() && win.isFocused()) win.webContents.focus(); });
   win.loadFile('index.html');
   win.once('closed', () => {
     finestraPrincipale = null;
