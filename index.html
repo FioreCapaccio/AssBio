@@ -3699,6 +3699,8 @@
           <option value="clienti">👤 Clienti</option>
           <option value="interventi">🔧 Interventi</option>
           <option value="ricambi">📦 Ricambi</option>
+          <option value="calApp">📅 Calendario appuntamenti</option>
+          <option value="calIv">🗓️ Calendario interventi</option>
         </select>
         <input type="text" id="collegaViewSearch" placeholder="🔍 Cerca nell'archivio selezionato..." oninput="filtraDatiCollega()" style="flex:1;min-width:180px;padding:8px 10px;border-radius:8px;border:1px solid var(--border);">
       </div>
@@ -3708,6 +3710,20 @@
       <div id="collegaSezInterventi" class="table-wrap" style="display:none;"><table class="table"><thead><tr><th>Data</th><th>Cliente</th><th>Tipo</th><th>Stato</th></tr></thead><tbody id="collegaTbInterventi"></tbody></table></div>
 
       <div id="collegaSezRicambi" class="table-wrap" style="display:none;"><table class="table"><thead><tr><th>Codice</th><th>Descrizione</th><th>Qtà</th><th>UM</th></tr></thead><tbody id="collegaTbRicambi"></tbody></table></div>
+
+      <div id="collegaSezCalendario" style="display:none;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" onclick="cambiaMeseCalendarioCollega(-1)">‹ Mese prec.</button>
+          <button class="btn btn-ghost btn-sm" onclick="vaiOggiCalendarioCollega()">Oggi</button>
+          <button class="btn btn-ghost btn-sm" onclick="cambiaMeseCalendarioCollega(1)">Mese succ. ›</button>
+          <h3 id="collegaCalTitolo" style="margin:0 0 0 8px; text-transform:capitalize;"></h3>
+        </div>
+        <div id="collegaCalAvviso" style="display:none; font-size:0.8rem; color:var(--text-muted); margin-bottom:8px;"></div>
+        <div class="cal-grid" style="margin-bottom:6px;">
+          <div class="cal-weekday">Lun</div><div class="cal-weekday">Mar</div><div class="cal-weekday">Mer</div><div class="cal-weekday">Gio</div><div class="cal-weekday">Ven</div><div class="cal-weekday">Sab</div><div class="cal-weekday">Dom</div>
+        </div>
+        <div class="cal-grid" id="collegaCalGrid"></div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="chiudiDatiCollega()">Chiudi</button>
@@ -3753,7 +3769,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.37 • 7 ott 2026';
+const APP_VERSION = '2.10.38 • 17 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -7570,7 +7586,7 @@ const SUPABASE = {
 
   async loadUserData(userId) {
     const sb = this.getClient();
-    const tables = ['clienti', 'interventi', 'ricambi', 'fornitori', 'bolle', 'ordini', 'inventari'];
+    const tables = ['clienti', 'interventi', 'ricambi', 'fornitori', 'bolle', 'ordini', 'inventari', 'appuntamenti'];
     const data = {};
     for (const tbl of tables) {
       try {
@@ -7675,6 +7691,8 @@ function mostraDatiCollega() {
   const inputSearch = document.getElementById('collegaViewSearch');
   if (selArchivio) selArchivio.value = 'clienti';
   if (inputSearch) inputSearch.value = '';
+  _collegaCalMese = new Date().getMonth();
+  _collegaCalAnno = new Date().getFullYear();
   filtraDatiCollega();
   openModal('modalCollegaView');
 }
@@ -7694,6 +7712,11 @@ function filtraDatiCollega() {
   document.getElementById('collegaSezClienti').style.display = archivio === 'clienti' ? '' : 'none';
   document.getElementById('collegaSezInterventi').style.display = archivio === 'interventi' ? '' : 'none';
   document.getElementById('collegaSezRicambi').style.display = archivio === 'ricambi' ? '' : 'none';
+  const eCalendario = archivio === 'calApp' || archivio === 'calIv';
+  document.getElementById('collegaSezCalendario').style.display = eCalendario ? '' : 'none';
+  const campoRicerca = document.getElementById('collegaViewSearch');
+  if (campoRicerca) campoRicerca.style.display = eCalendario ? 'none' : '';
+  if (eCalendario) { renderCalendarioCollega(archivio); return; }
 
   const clienti = d.clienti || [];
   const interventi = d.interventi || [];
@@ -7722,6 +7745,82 @@ function filtraDatiCollega() {
       ? filtrati.map(r => `<tr><td><strong>${escHtml(r.codice||'')}</strong></td><td>${escHtml(r.descrizione||'')}</td><td style="text-align:center;">${r.qta||0}</td><td>${escHtml(r.um||'pz')}</td></tr>`).join('')
       : '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);">Nessun ricambio</td></tr>';
   }
+}
+
+// Calendari (appuntamenti / interventi) dell'archivio di un collega, in SOLA LETTURA: stessa
+// griglia, colori e icone dei calendari personali, ma nessun clic apre o crea record (gli id
+// del collega non corrispondono ai tuoi). tipo = 'calApp' | 'calIv'.
+let _collegaCalMese = new Date().getMonth();
+let _collegaCalAnno = new Date().getFullYear();
+const _COLLEGA_COLORI_STATO = {
+  calApp: { 'Programmato': '#3b82f6', 'Confermato': '#8b5cf6', 'Completato': '#10b981', 'Annullato': '#ef4444' },
+  calIv: { 'Aperto': '#3b82f6', 'In corso': '#f59e0b', 'In attesa ricambi': '#8b5cf6', 'Chiuso': '#10b981', 'Annullato': '#ef4444' }
+};
+
+function cambiaMeseCalendarioCollega(delta) {
+  _collegaCalMese += delta;
+  if (_collegaCalMese < 0) { _collegaCalMese = 11; _collegaCalAnno--; }
+  if (_collegaCalMese > 11) { _collegaCalMese = 0; _collegaCalAnno++; }
+  filtraDatiCollega();
+}
+
+function vaiOggiCalendarioCollega() {
+  _collegaCalMese = new Date().getMonth();
+  _collegaCalAnno = new Date().getFullYear();
+  filtraDatiCollega();
+}
+
+function renderCalendarioCollega(tipo) {
+  const d = _datiCollega;
+  const grid = document.getElementById('collegaCalGrid');
+  if (!d || !grid) return;
+  const clienti = d.clienti || [];
+  const record = (tipo === 'calApp' ? d.appuntamenti : d.interventi) || [];
+  const nomiMesi = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+  document.getElementById('collegaCalTitolo').textContent = `${nomiMesi[_collegaCalMese]} ${_collegaCalAnno}`;
+
+  const avviso = document.getElementById('collegaCalAvviso');
+  avviso.style.display = record.length ? 'none' : '';
+  avviso.textContent = tipo === 'calApp'
+    ? 'Nessun appuntamento nell\'archivio di questo collega. Se ne ti aspettavi, la tabella "appuntamenti" potrebbe non essere leggibile dai colleghi (policy di Supabase).'
+    : 'Nessun intervento nell\'archivio di questo collega.';
+
+  const perGiorno = {};
+  record.forEach(r => { if (r && r.data) (perGiorno[r.data] = perGiorno[r.data] || []).push(r); });
+  Object.values(perGiorno).forEach(l => l.sort((x, y) => (x.oraInizio || '').localeCompare(y.oraInizio || '')));
+
+  const evento = (r) => {
+    const cl = clienti.find(c => c.id === r.clienteId);
+    const nomeCl = cl ? (cl.ragione || cl.nome || 'N/D') : (r.clienteDatiPortale?.ragione || 'N/D');
+    const label = tipo === 'calApp' ? nomeCl : (r.numero ? r.numero + ' — ' : '') + nomeCl;
+    const colore = (tipo === 'calApp' && r.origine === 'merck' && r.stato === 'Programmato') ? '#9333ea'
+      : (_COLLEGA_COLORI_STATO[tipo][r.stato] || '#64748b');
+    const icona = _iconaTipoIntervento(r.tipo);
+    const titolo = [icona && icona.titolo, label, r.stato, r.tecnico].filter(Boolean).join(' · ');
+    return { label, colore, icona, titolo };
+  };
+
+  const offset = (new Date(_collegaCalAnno, _collegaCalMese, 1).getDay() + 6) % 7; // lunedì = 0
+  const giorniNelMese = new Date(_collegaCalAnno, _collegaCalMese + 1, 0).getDate();
+  const celle = Math.ceil((offset + giorniNelMese) / 7) * 7;
+  const oggi = today();
+  const maxMostrati = 3;
+  let html = '';
+  for (let i = 0; i < celle; i++) {
+    const num = i - offset + 1;
+    const dt = new Date(_collegaCalAnno, _collegaCalMese, num);
+    // data costruita dai valori locali, mai via toISOString/UTC (disallineerebbe di un giorno)
+    const ds = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+    const ev = perGiorno[ds] || [];
+    const mostrati = ev.slice(0, maxMostrati).map(r => {
+      const e = evento(r);
+      return `<div class="cal-event" style="background:${e.colore};cursor:default;" title="${escAttr(e.titolo)}">${e.icona ? e.icona.icona + ' ' : ''}${escHtml(e.label)}</div>`;
+    }).join('');
+    const altri = ev.length > maxMostrati
+      ? `<div class="cal-more" title="${escAttr(ev.slice(maxMostrati).map(r => evento(r).titolo).join('\n'))}">+${ev.length - maxMostrati} altri</div>` : '';
+    html += `<div class="cal-day${(num < 1 || num > giorniNelMese) ? ' cal-day-out' : ''}${ds === oggi ? ' cal-day-today' : ''}"><div class="cal-day-num">${dt.getDate()}</div><div class="cal-day-events">${mostrati}${altri}</div></div>`;
+  }
+  grid.innerHTML = html;
 }
 
 function escHtml(s) {
