@@ -3769,7 +3769,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.38 • 17 ott 2026';
+const APP_VERSION = '2.10.39 • 22 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -6977,6 +6977,44 @@ function _confirmModal(message) {
   });
 }
 
+// prompt() non è supportato in Electron: stessa struttura di _confirmModal, con un campo di
+// testo. Risolve col testo inserito, o null se si annulla.
+function _promptModal(message, valoreIniziale = '') {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay open';
+    overlay.style.zIndex = '10000';
+    overlay.innerHTML = `
+      <div class="modal" style="max-width:460px; padding:28px;">
+        <p style="font-size:15px; margin-bottom:14px; line-height:1.6;">${message.replace(/</g,'&lt;')}</p>
+        <input type="text" id="_pmInput" style="margin-bottom:20px;">
+        <div style="display:flex;gap:12px;justify-content:center;">
+          <button class="btn btn-ghost" id="_pmCancel" style="min-width:90px;">Annulla</button>
+          <button class="btn btn-primary" id="_pmOk" style="min-width:90px;">OK</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    _openModalCount++;
+    document.body.style.overflow = 'hidden';
+    const input = document.getElementById('_pmInput');
+    input.value = valoreIniziale;
+    const cleanup = (val) => {
+      overlay.remove();
+      _openModalCount = Math.max(0, _openModalCount - 1);
+      if (_openModalCount <= 0) { _openModalCount = 0; document.body.style.overflow = ''; }
+      resolve(val);
+    };
+    document.getElementById('_pmOk').onclick = () => cleanup(input.value);
+    document.getElementById('_pmCancel').onclick = () => cleanup(null);
+    overlay.addEventListener('keydown', e => {
+      if (e.key === 'Escape') cleanup(null);
+      else if (e.key === 'Enter') cleanup(input.value);
+    });
+    input.focus();
+    input.select();
+  });
+}
+
 // ======================== CLOUD SYNC (SUPABASE) ========================
 
 const SUPABASE = {
@@ -8440,11 +8478,11 @@ function renderFirmeCliente(cliente) {
   }).join('');
 }
 
-function rinominaFirmaCliente(clienteId, firmaIdx) {
+async function rinominaFirmaCliente(clienteId, firmaIdx) {
   const cliente = DB.clienti.find(c => c.id === clienteId);
   if (!cliente || !cliente.firme || !cliente.firme[firmaIdx]) return;
   const f = cliente.firme[firmaIdx];
-  const nuovoNome = prompt('Nome di chi ha firmato:', f.nomeFirmatario || '');
+  const nuovoNome = await _promptModal('Nome di chi ha firmato:', f.nomeFirmatario || '');
   if (nuovoNome === null) return;
   f.nomeFirmatario = nuovoNome.trim();
   DB.save();
