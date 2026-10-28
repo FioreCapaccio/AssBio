@@ -21,6 +21,19 @@ contextBridge.exposeInMainWorld('ivdFS', {
   ripristinaFocus: () => ipcRenderer.invoke('finestra:ripristinaFocus'),
 });
 
+// Accessi (Supabase + portale Merck) nel backup: le password vivono solo nel main, cifrate dal
+// sistema operativo; nel file di backup finiscono cifrate con la "password del backup".
+// segretiPerBackup() restituisce solo testo già cifrato; leggiSupabase() è l'unico canale che
+// riporta una password al renderer (serve a precompilare il login Supabase, fatto lato renderer).
+contextBridge.exposeInMainWorld('ivdAccessi', {
+  statoPasswordBackup: () => ipcRenderer.invoke('backup:statoPassword'),
+  impostaPasswordBackup: (password) => ipcRenderer.invoke('backup:impostaPassword', password),
+  segretiPerBackup: () => ipcRenderer.invoke('backup:segreti'),
+  ripristinaSegreti: (cifrati, password) => ipcRenderer.invoke('backup:ripristinaSegreti', cifrati, password),
+  salvaSupabase: (email, password) => ipcRenderer.invoke('credenziali:salvaSupabase', email, password),
+  leggiSupabase: () => ipcRenderer.invoke('credenziali:supabase'),
+});
+
 // Ponte per il portale Merck (chiamate/WO → appuntamenti). Solo invoke verso canali
 // "merck:*" stretti: le credenziali salvate NON tornano mai al renderer (la password
 // resta nel main, cifrata con safeStorage); il renderer passa solo l'URL del portale.

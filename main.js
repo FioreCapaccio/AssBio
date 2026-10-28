@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, shell, session, ipcMain, dialog, safeStorage }
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
+const crypto = require('crypto');
 
 // URL dell'app (file://.../index.html): unica pagina che la finestra principale ha il
 // diritto di caricare. Usato per l'allowlist di navigazione.
@@ -1190,9 +1191,121 @@ app.on('web-contents-created', (event, contents) => {
   contents.session.setPermissionCheckHandler(() => false);
 });
 
+// ============================================================================
+// ACCESSI NEL BACKUP (Supabase + portale Merck)
+// Il backup deve poter ripristinare TUTTO, anche gli accessi. Le password vivono solo qui nel
+// main, cifrate dal sistema operativo (safeStorage: Keychain/DPAPI, legate a QUESTO computer e
+// quindi non portabili). Nel file di backup finiscono cifrate con una PASSWORD DI BACKUP scelta
+// dall'utente (scrypt + AES-256-GCM): chi trova il file non ottiene nessun accesso; sul computer
+// nuovo basta digitare quella password e gli accessi vengono ricifrati col suo safeStorage.
+// La password di backup è conservata (sempre via safeStorage) per cifrare senza chiedere nulla
+// anche i backup automatici.
+// ============================================================================
+const SCRYPT_OPZIONI = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+const PREFISSO_SEGRETI = 'ivd-enc-v1';
+
+function cifraSegreti(oggetto, password) {
+  const salt = crypto.randomBytes(16), iv = crypto.randomBytes(12);
+  const chiave = crypto.scryptSync(password, salt, 32, SCRYPT_OPZIONI);
+  const c = crypto.createCipheriv('aes-256-gcm', chiave, iv);
+  const testo = Buffer.concat([c.update(JSON.stringify(oggetto), 'utf8'), c.final()]);
+  return [PREFISSO_SEGRETI, ...[salt, iv, c.getAuthTag(), testo].map(b => b.toString('base64url'))].join('.');
+}
+
+// Lancia se la password è sbagliata o il testo è alterato (l'autenticazione GCM fallisce).
+function decifraSegreti(stringa, password) {
+  const [prefisso, s, i, t, x] = String(stringa || '').split('.');
+  if (prefisso !== PREFISSO_SEGRETI || !s || !i || !t || !x) throw new Error('Formato degli accessi cifrati non riconosciuto');
+  const [salt, iv, tag, testo] = [s, i, t, x].map(v => Buffer.from(v, 'base64url'));
+  const chiave = crypto.scryptSync(password, salt, 32, SCRYPT_OPZIONI);
+  const d = crypto.createDecipheriv('aes-256-gcm', chiave, iv);
+  d.setAuthTag(tag);
+  return JSON.parse(Buffer.concat([d.update(testo), d.final()]).toString('utf8'));
+}
+
+function leggiSegretoCfg(campoEnc) {
+  if (!campoEnc || !safeStorage.isEncryptionAvailable()) return null;
+  try { return safeStorage.decryptString(Buffer.from(campoEnc, 'base64')); } catch { return null; }
+}
+
+function supabaseCredenziali() {
+  const cfg = leggiConfig();
+  if (!cfg.supabase || !cfg.supabase.passEnc) return null;
+  const password = leggiSegretoCfg(cfg.supabase.passEnc);
+  return password === null ? null : { email: String(cfg.supabase.email || ''), password };
+}
+
+function registraCanaliAccessi() {
+  ipcMain.handle('backup:statoPassword', () => ({
+    cifraturaDisponibile: safeStorage.isEncryptionAvailable(),
+    impostata: !!leggiSegretoCfg(leggiConfig().backupPassEnc)
+  }));
+
+  ipcMain.handle('backup:impostaPassword', (event, password) => {
+    if (typeof password !== 'string' || password.length < 6) return { ok: false, errore: 'La password del backup deve avere almeno 6 caratteri.' };
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, errore: 'Cifratura del sistema operativo non disponibile: gli accessi non possono essere protetti.' };
+    const cfg = leggiConfig();
+    cfg.backupPassEnc = safeStorage.encryptString(password).toString('base64');
+    salvaConfig(cfg);
+    return { ok: true };
+  });
+
+  // Accessi da mettere nel backup, già cifrati. Mai in chiaro verso il renderer.
+  ipcMain.handle('backup:segreti', () => {
+    const cfg = leggiConfig();
+    const merck = merckCredenziali();
+    const supabase = supabaseCredenziali();
+    const supabaseEmail = (supabase && supabase.email) || String((cfg.supabase && cfg.supabase.email) || '');
+    if (!merck && !supabase) return { ok: true, cifrati: null, supabaseEmail, motivo: 'nessun-accesso' };
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, cifrati: null, supabaseEmail, motivo: 'cifratura-non-disponibile' };
+    const passwordBackup = leggiSegretoCfg(cfg.backupPassEnc);
+    if (!passwordBackup) return { ok: false, cifrati: null, supabaseEmail, motivo: 'password-mancante' };
+    return { ok: true, supabaseEmail, cifrati: cifraSegreti({ merck, supabase }, passwordBackup) };
+  });
+
+  // Ripristino degli accessi da un backup: decifra con la password digitata e li ricifra col
+  // safeStorage di QUESTO computer. Se la password è sbagliata non cambia nulla.
+  ipcMain.handle('backup:ripristinaSegreti', (event, cifrati, password) => {
+    if (typeof cifrati !== 'string' || typeof password !== 'string' || !password) return { ok: false, errore: 'Dati non validi.' };
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, errore: 'Cifratura del sistema operativo non disponibile su questo computer.' };
+    let segreti;
+    try { segreti = decifraSegreti(cifrati, password); }
+    catch (e) { return { ok: false, errore: 'Password del backup errata o file danneggiato.' }; }
+    const cfg = leggiConfig();
+    if (segreti.merck && segreti.merck.password) {
+      cfg.merck = { user: String(segreti.merck.user || ''), passEnc: safeStorage.encryptString(String(segreti.merck.password)).toString('base64'), aggiornataIl: segreti.merck.aggiornataIl || new Date().toISOString() };
+    }
+    if (segreti.supabase && segreti.supabase.password) {
+      cfg.supabase = { email: String(segreti.supabase.email || ''), passEnc: safeStorage.encryptString(String(segreti.supabase.password)).toString('base64') };
+    }
+    // La password di backup usata per decifrare diventa quella di questo computer: i backup
+    // automatici successivi continueranno a poter cifrare gli accessi senza chiedere nulla.
+    cfg.backupPassEnc = safeStorage.encryptString(password).toString('base64');
+    salvaConfig(cfg);
+    return { ok: true, merck: !!(segreti.merck && segreti.merck.password), supabase: segreti.supabase && segreti.supabase.password ? { email: String(segreti.supabase.email || '') } : null };
+  });
+
+  // Password Supabase: il login lo fa il renderer (supabase-js), quindi qui la password può
+  // tornare al renderer — solo su sua richiesta esplicita, per precompilare l'accesso.
+  ipcMain.handle('credenziali:salvaSupabase', (event, email, password) => {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) return { ok: false, errore: 'Valori non validi.' };
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, errore: 'Cifratura del sistema operativo non disponibile.' };
+    const cfg = leggiConfig();
+    cfg.supabase = { email: email.trim(), passEnc: safeStorage.encryptString(password).toString('base64') };
+    salvaConfig(cfg);
+    return { ok: true };
+  });
+
+  ipcMain.handle('credenziali:supabase', () => {
+    const c = supabaseCredenziali();
+    return c ? { presente: true, email: c.email, password: c.password } : { presente: false };
+  });
+}
+
 app.whenReady().then(() => {
   registraCanaliArchivio();
   registraCanaliMerck();
+  registraCanaliAccessi();
   installaMenu();
   createWindow();
   app.on('activate', () => {

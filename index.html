@@ -3328,9 +3328,13 @@
         <!-- BACKUP -->
         <div class="backup-card">
           <h4>⬇️ Esporta backup</h4>
-          <p>Salva una copia completa di tutti gli archivi (clienti, interventi, ricambi, lotti, fornitori, inventari) in un file JSON. Conservalo in un luogo sicuro.</p>
+          <p>Salva una copia completa in un file JSON: tutti gli archivi (clienti, interventi, appuntamenti, ricambi, lotti, fornitori, bolle, ordini, inventari), impostazioni, URL e accessi di Supabase e del portale Merck (le password <strong>cifrate</strong> con la password del backup), pattern dei PDF e registro attività. Conservalo in un luogo sicuro.</p>
           <button class="btn btn-primary" onclick="eseguiBackup()">Scarica backup JSON</button>
           <div class="backup-info" id="backupLastInfo">Nessun backup manuale effettuato in questa sessione.</div>
+          <div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border);">
+            <div id="backupPasswordInfo" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px;">—</div>
+            <button class="btn btn-ghost btn-sm" onclick="impostaPasswordBackupUI()">🔐 Imposta / cambia password del backup</button>
+          </div>
         </div>
 
         <!-- ARCHIVIO LOCALE SU CARTELLA -->
@@ -3769,7 +3773,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.39 • 22 ott 2026';
+const APP_VERSION = '2.10.40 • 28 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -6979,7 +6983,7 @@ function _confirmModal(message) {
 
 // prompt() non è supportato in Electron: stessa struttura di _confirmModal, con un campo di
 // testo. Risolve col testo inserito, o null se si annulla.
-function _promptModal(message, valoreIniziale = '') {
+function _promptModal(message, valoreIniziale = '', tipo = 'text') {
   return new Promise(resolve => {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay open';
@@ -6997,6 +7001,7 @@ function _promptModal(message, valoreIniziale = '') {
     _openModalCount++;
     document.body.style.overflow = 'hidden';
     const input = document.getElementById('_pmInput');
+    input.type = tipo;
     input.value = valoreIniziale;
     const cleanup = (val) => {
       overlay.remove();
@@ -7087,6 +7092,9 @@ const SUPABASE = {
     this._session = data.session;
     this.isLoggedIn = true;
     this._firmeCaricate = {}; // un altro account: nessun record risulta già caricato
+    // Email e password restano nell'app (cifrate dal sistema operativo, come per Merck): servono
+    // al backup e a ritrovare l'accesso già compilato dopo un ripristino.
+    try { if (window.ivdAccessi) window.ivdAccessi.salvaSupabase(email, password); } catch (e) {}
     this.onLoginSuccess();
     await this.syncDown(true);
   },
@@ -12540,6 +12548,7 @@ function eseguiRipristinoSelettivo() {
     }
     
     _caricaImpostazioni();
+    _applicaAccessiRipristinati(_restorePayload);
   }
 
   // Sincronizzazione contatori ID. Le chiavi di _nextId sono SINGOLARI (cliente,
@@ -12592,17 +12601,7 @@ async function _scriviAutoBackup(modalita = 'auto') {
   if (_autoBackupScrittura) return;
   _autoBackupScrittura = true;
   try {
-    const payload = {
-      version: '2.0', app: 'IVD Assistenza Tecnica',
-      date: new Date().toISOString(),
-      data: { clienti: DB.clienti, interventi: DB.interventi, ricambi: DB.ricambi,
-               fornitori: DB.fornitori, bolle: DB.bolle, ordini: DB.ordini,
-               inventari: DB.inventari, appuntamenti: DB.appuntamenti || [],
-               _nextId: DB._nextId, opzioni: DB.opzioni },
-      impostazioni: { logo: localStorage.getItem('ivd_logo'),
-                      intestazione: localStorage.getItem('ivd_intestazione'),
-                      tema: localStorage.getItem('ivd_tema') }
-    };
+    const { payload } = await _costruisciBackup();
     const res = await window.ivdFS.backupSnapshot(JSON.stringify(payload, null, 2));
     _ultimoAutoBackup = ora;
     if (modalita === 'manuale') {
@@ -12635,6 +12634,7 @@ async function aggiornaInfoArchivio() {
 
 // ---- Card "Backup automatico incrementale": cartella indipendente dall'archivio ----
 async function aggiornaInfoBackupAuto() {
+  aggiornaStatoPasswordBackup();
   const el = document.getElementById('backupAutoInfo');
   if (!el) return;
   if (!window.ivdFS) {
@@ -12925,45 +12925,152 @@ function allineaFornitoriInterventi() {
   }
 }
 
-function eseguiBackup() {
-  // BUG FIX: l'intera funzione non era protetta — un JSON.parse su un dato secondario
-  // corrotto in localStorage (es. merck_pdf_patterns) lanciava un'eccezione non gestita e
-  // il backup falliva silenziosamente: nessun file scaricato, nessun avviso, sembrava
-  // semplicemente che non fosse successo nulla.
-  try {
-    let merckPatterns = null;
-    try { merckPatterns = JSON.parse(localStorage.getItem('merck_pdf_patterns') || 'null'); }
-    catch (e) { console.warn('merck_pdf_patterns corrotto, escluso dal backup:', e); }
+// ======================== BACKUP COMPLETO ========================
+// Un SOLO costruttore per il backup manuale (file scaricato) e per quello automatico (cartella a
+// rotazione): prima erano due JSON diversi e quello automatico perdeva pattern PDF Merck,
+// dimensione carattere e dati Supabase. Il backup contiene TUTTO ciò che serve a ripristinare
+// l'app su un computer nuovo, accessi compresi (cifrati con la password del backup: vedi main.js).
+async function _costruisciBackup() {
+  let merckPatterns = null;
+  try { merckPatterns = JSON.parse(localStorage.getItem('merck_pdf_patterns') || 'null'); }
+  catch (e) { console.warn('merck_pdf_patterns corrotto, escluso dal backup:', e); }
+  let auditLog = [];
+  try { auditLog = JSON.parse(localStorage.getItem('ivd_audit_log') || '[]'); } catch (e) {}
 
-    const payload = {
-      version: '2.0',
-      app: 'IVD Assistenza Tecnica',
-      date: new Date().toISOString(),
-      data: {
-        clienti:    DB.clienti,
-        interventi: DB.interventi,
-        ricambi:    DB.ricambi,
-        fornitori:  DB.fornitori,
-        bolle:      DB.bolle,
-        ordini:     DB.ordini,
-        inventari:  DB.inventari,
-        appuntamenti: DB.appuntamenti,
-        _nextId:    DB._nextId,
-        opzioni:    DB.opzioni,
-        merckPatterns,
-        supabase: {
-          username: localStorage.getItem('ivd_gh_username') || '',
-          url: localStorage.getItem('ivd_supabase_url') || '',
-          anonKey: localStorage.getItem('ivd_supabase_anon_key') || ''
-        }
+  let percorsi = null;
+  if (window.ivdFS) {
+    try { const i = await window.ivdFS.info(); percorsi = { cartellaDati: i.dir, cartellaBackup: i.dirBackup }; } catch (e) {}
+  }
+  let segreti = { cifrati: null, supabaseEmail: '', motivo: null };
+  if (window.ivdAccessi) {
+    try { segreti = await window.ivdAccessi.segretiPerBackup(); } catch (e) { console.warn('Accessi non inclusi nel backup:', e); }
+  }
+
+  const payload = {
+    version: '2.1',
+    app: 'IVD Assistenza Tecnica',
+    versioneApp: APP_VERSION,
+    backupCompleto: true,
+    date: new Date().toISOString(),
+    data: {
+      clienti: DB.clienti, interventi: DB.interventi, ricambi: DB.ricambi, fornitori: DB.fornitori,
+      bolle: DB.bolle, ordini: DB.ordini, inventari: DB.inventari, appuntamenti: DB.appuntamenti || [],
+      _nextId: DB._nextId, opzioni: DB.opzioni,
+      merckPatterns,
+      supabase: {
+        username: segreti.supabaseEmail || '', // nome storico del campo, letto anche dalle versioni precedenti
+        email: segreti.supabaseEmail || '',
+        url: localStorage.getItem('ivd_supabase_url') || '',
+        anonKey: localStorage.getItem('ivd_supabase_anon_key') || ''
       },
-      impostazioni: {
-        logo:        localStorage.getItem('ivd_logo') || null,
-        intestazione:localStorage.getItem('ivd_intestazione') || '',
-        tema:        localStorage.getItem('ivd_tema') || 'light',
-        fontSize:    localStorage.getItem('ivd_font_size') || '16'
-      }
-    };
+      merck: { url: localStorage.getItem('ivd_merck_url') || '' },
+      auditLog
+    },
+    impostazioni: {
+      logo: localStorage.getItem('ivd_logo') || null,
+      intestazione: localStorage.getItem('ivd_intestazione') || '',
+      tema: localStorage.getItem('ivd_tema') || 'light',
+      fontSize: localStorage.getItem('ivd_font_size') || '16'
+    },
+    // Solo informative (sono percorsi di QUESTO computer): non vengono mai ripristinate.
+    percorsi,
+    segretiCifrati: segreti.cifrati || null
+  };
+  return { payload, segretiMotivo: segreti.cifrati ? null : (segreti.motivo || null) };
+}
+
+// Chiede (due volte, per evitare refusi: sbagliarla significherebbe non poter più ripristinare
+// gli accessi) la password con cui cifrare gli accessi nel backup. true se è stata impostata.
+async function _chiediPasswordBackup() {
+  const p1 = await _promptModal('Scegli una password per proteggere gli accessi (Supabase e portale Merck) dentro il backup.\n\nSe la dimentichi, i dati si ripristinano ma gli accessi no. Almeno 6 caratteri.', '', 'password');
+  if (p1 === null) return false;
+  if (p1.length < 6) { mostraToast('La password deve avere almeno 6 caratteri.', 'warning'); return false; }
+  const p2 = await _promptModal('Ripeti la password del backup:', '', 'password');
+  if (p2 === null) return false;
+  if (p1 !== p2) { mostraToast('Le due password non coincidono: non è stata impostata.', 'warning'); return false; }
+  const r = await window.ivdAccessi.impostaPasswordBackup(p1);
+  if (!r.ok) { mostraToast('❌ ' + r.errore, 'danger'); return false; }
+  mostraToast('🔐 Password del backup impostata.', 'success');
+  aggiornaStatoPasswordBackup();
+  return true;
+}
+
+async function impostaPasswordBackupUI() {
+  if (!window.ivdAccessi) { mostraToast('Disponibile solo nell\'app desktop.', 'warning'); return; }
+  await _chiediPasswordBackup();
+}
+
+async function aggiornaStatoPasswordBackup() {
+  const el = document.getElementById('backupPasswordInfo');
+  if (!el) return;
+  if (!window.ivdAccessi) { el.textContent = 'Disponibile solo nell\'app desktop.'; return; }
+  try {
+    const st = await window.ivdAccessi.statoPasswordBackup();
+    el.innerHTML = !st.cifraturaDisponibile
+      ? '⚠️ La cifratura del sistema non è disponibile su questo computer: gli accessi <strong>non</strong> possono essere inclusi nel backup.'
+      : st.impostata
+        ? '🔐 Password impostata: gli accessi (Supabase e portale Merck) sono inclusi nei backup, <strong>cifrati</strong>.'
+        : '⚠️ Password non impostata: i backup <strong>non</strong> includono gli accessi (Supabase e portale Merck). Impostala per includerli.';
+  } catch (e) { el.textContent = ''; }
+}
+
+// Precompila il login Supabase con gli accessi salvati (dopo un accesso riuscito o un ripristino).
+async function precompilaAccessoSupabase() {
+  if (!window.ivdAccessi) return;
+  try {
+    const c = await window.ivdAccessi.leggiSupabase();
+    if (!c || !c.presente) return;
+    const em = document.getElementById('supabaseEmail'), pw = document.getElementById('supabasePassword');
+    if (em && !em.value) em.value = c.email;
+    if (pw && !pw.value) pw.value = c.password;
+  } catch (e) {}
+}
+
+// Applica al ripristino ciò che non sono archivi: URL del portale Merck, registro attività,
+// email Supabase e — se il backup contiene accessi cifrati — chiede la password del backup e li
+// rimette in uso. Il ripristino dei DATI non dipende da questo: password sbagliata o annullata =
+// gli accessi vanno solo reinseriti a mano.
+async function _applicaAccessiRipristinati(payload) {
+  if (!payload) return;
+  const d = payload.data || {};
+  if (d.merck && d.merck.url) localStorage.setItem('ivd_merck_url', d.merck.url);
+  if (Array.isArray(d.auditLog) && d.auditLog.length) {
+    const log = d.auditLog.slice(-500);
+    localStorage.setItem('ivd_audit_log', JSON.stringify(log));
+    if (typeof AUDIT !== 'undefined') AUDIT._log = log;
+  }
+  const email = (d.supabase && (d.supabase.email || d.supabase.username)) || '';
+  const campoEmail = document.getElementById('supabaseEmail');
+  if (email && campoEmail && !campoEmail.value) campoEmail.value = email;
+  if (typeof merckAggiornaStatoCard === 'function') merckAggiornaStatoCard();
+
+  if (!payload.segretiCifrati || !window.ivdAccessi) return;
+  for (let tentativo = 0; tentativo < 3; tentativo++) {
+    const pw = await _promptModal('Questo backup contiene gli accessi (Supabase e portale Merck) cifrati.\n\nInserisci la password del backup per ripristinarli (Annulla per saltarli: dovrai reinserirli a mano).', '', 'password');
+    if (pw === null) { mostraToast('Accessi non ripristinati: reinseriscili in Impostazioni (Cloud e Portale Merck).', 'warning'); return; }
+    const r = await window.ivdAccessi.ripristinaSegreti(payload.segretiCifrati, pw);
+    if (r.ok) {
+      mostraToast('🔐 Accessi ripristinati' + (r.supabase ? ' (Supabase: ' + r.supabase.email + ')' : '') + (r.merck ? ' · portale Merck' : '') + '.', 'success');
+      precompilaAccessoSupabase();
+      if (typeof merckAggiornaStatoCard === 'function') merckAggiornaStatoCard();
+      aggiornaStatoPasswordBackup();
+      return;
+    }
+    mostraToast('❌ ' + r.errore, 'danger');
+  }
+  mostraToast('Accessi non ripristinati dopo 3 tentativi: reinseriscili in Impostazioni.', 'warning');
+}
+
+async function eseguiBackup() {
+  // BUG FIX: l'intera funzione non era protetta — un dato secondario corrotto in localStorage
+  // lanciava un'eccezione non gestita e il backup falliva silenziosamente.
+  try {
+    // Prima volta: senza la password del backup gli accessi non possono finire nel file.
+    if (window.ivdAccessi) {
+      const st = await window.ivdAccessi.statoPasswordBackup();
+      if (st.cifraturaDisponibile && !st.impostata) await _chiediPasswordBackup();
+    }
+    const { payload, segretiMotivo } = await _costruisciBackup();
     const json = JSON.stringify(payload, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
@@ -12974,8 +13081,12 @@ function eseguiBackup() {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const accessi = payload.segretiCifrati ? ' · 🔐 accessi inclusi (cifrati)'
+      : segretiMotivo === 'password-mancante' ? ' · ⚠️ accessi NON inclusi (nessuna password del backup)'
+      : segretiMotivo === 'cifratura-non-disponibile' ? ' · ⚠️ accessi NON inclusi (cifratura del sistema non disponibile)'
+      : '';
     const info = document.getElementById('backupLastInfo');
-    if (info) info.innerHTML = `✅ Backup eseguito: <strong>${new Date().toLocaleString('it-IT')}</strong> &nbsp;·&nbsp; ${DB.clienti.length} clienti · ${DB.interventi.length} interventi · ${DB.ricambi.length} ricambi · ${DB.bolle.length} bolle · ${DB.ordini.length} ordini`;
+    if (info) info.innerHTML = `✅ Backup eseguito: <strong>${new Date().toLocaleString('it-IT')}</strong> &nbsp;·&nbsp; ${DB.clienti.length} clienti · ${DB.interventi.length} interventi · ${DB.ricambi.length} ricambi · ${DB.bolle.length} bolle · ${DB.ordini.length} ordini${accessi}`;
   } catch (e) {
     console.error('Errore durante il backup:', e);
     mostraToast('❌ Errore durante la creazione del backup: ' + (e.message || e), 'danger');
@@ -13190,7 +13301,10 @@ function anteprimaRestore(event) {
         <tr><td>Contatori ID</td><td>${d._nextId ? Object.entries(d._nextId).map(([k,v])=>`${k}:${v}`).join(' · ') : '—'}</td></tr>
         ${hasImpostazioni ? `<tr><td>Impostazioni</td><td>${imp.logo?'Logo ✓':'Logo ✗'} · ${imp.intestazione?'Intestazione ✓':'Intestazione ✗'} · Tema: ${imp.tema||'default'}</td></tr>` : ''}
         ${d.opzioni ? `<tr><td>Opzioni</td><td>Stati: ${(d.opzioni.stati||[]).length} · Tipi: ${(d.opzioni.tipi||[]).length} · Esiti: ${(d.opzioni.esiti||[]).length}</td></tr>` : ''}
-        ${d.supabase && d.supabase.url ? `<tr><td>Cloud Supabase</td><td>✅ Credenziali presenti (${d.supabase.url.replace(/https?:\/\//,'')})</td></tr>` : ''}
+        ${d.supabase && d.supabase.url ? `<tr><td>Cloud Supabase</td><td>✅ Credenziali presenti (${d.supabase.url.replace(/https?:\/\//,'')})${(d.supabase.email || d.supabase.username) ? ' · ' + escFn(d.supabase.email || d.supabase.username) : ''}</td></tr>` : ''}
+        ${d.merck && d.merck.url ? `<tr><td>Portale Merck</td><td>✅ URL presente (${escFn(d.merck.url.replace(/https?:\/\//,'').slice(0, 60))})</td></tr>` : ''}
+        ${payload.segretiCifrati ? `<tr><td>Accessi (password)</td><td>🔐 Cifrati nel backup: al ripristino servirà la password del backup</td></tr>` : (payload.backupCompleto ? `<tr><td>Accessi (password)</td><td>⚠️ Non inclusi in questo backup</td></tr>` : '')}
+        ${Array.isArray(d.auditLog) && d.auditLog.length ? `<tr><td>Registro attività</td><td>${d.auditLog.length} voci</td></tr>` : ''}
       `;
       const msgEl = document.getElementById('restoreVerificaMsg');
       const btn   = document.getElementById('btnRipristina');
@@ -13254,6 +13368,7 @@ function confermarestore() {
   DB.save();
   // Ricarica impostazioni in UI
   _caricaImpostazioni();
+  const payloadAccessi = _restorePayload; // serve dopo, quando la finestra del ripristino si chiude
   _restorePayload = null;
   const esitoEl = document.getElementById('restoreEsitoMsg');
   if (esitoEl) esitoEl.innerHTML = '✅ <strong>Ripristino completato!</strong>';
@@ -13262,6 +13377,7 @@ function confermarestore() {
     closeModal('modalBackup');
     renderAll();
     mostraToast('✅ Ripristino completato.\n\nArchivi aggiornati:\n· Clienti: ' + DB.clienti.length + '\n· Interventi: ' + DB.interventi.length + '\n· Ricambi: ' + DB.ricambi.length + '\n· Fornitori: ' + DB.fornitori.length);
+    _applicaAccessiRipristinati(payloadAccessi);
   }, 600);
 }
 
@@ -15728,6 +15844,7 @@ function _caricaImpostazioni() {
   if (urlEl) urlEl.value = sbUrl;
   if (keyEl) keyEl.value = sbKey;
   if (typeof SUPABASE !== 'undefined') SUPABASE.aggiornaCloudDiagPanel();
+  precompilaAccessoSupabase();
 }
 
 function caricaLogo(event) {
