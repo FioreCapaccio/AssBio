@@ -830,6 +830,40 @@ const MERCK_STATO_PAGINA_SCRIPT = `(() => {
   return { passwordVisibile, errore, url: location.href };
 })()`;
 
+// Barra con le frecce Indietro/Avanti nella finestra del portale (che non ha barra di navigazione
+// né menu): piccola pillola fissa in basso a sinistra, iniettata nella pagina. Si crea una volta e
+// poi se ne aggiorna solo lo stato attivo/disattivo; viene rimessa se il portale (app a pagina
+// singola) ricostruisce il documento. Gli stili passano da CSSOM e i clic da addEventListener:
+// niente attributi inline, che le policy CSP dei portali bloccherebbero.
+const MERCK_FRECCE_SCRIPT = `(() => {
+  const stato = __STATO__;
+  let barra = document.getElementById('__ivd_merck_nav__');
+  if (!barra) {
+    barra = document.createElement('div');
+    barra.id = '__ivd_merck_nav__';
+    barra.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483647;display:flex;gap:4px;padding:4px;border-radius:10px;background:rgba(30,41,59,0.88);box-shadow:0 2px 10px rgba(0,0,0,0.35);';
+    const bottone = (id, testo, titolo, azione) => {
+      const b = document.createElement('button');
+      b.id = id; b.type = 'button'; b.textContent = testo; b.title = titolo;
+      b.style.cssText = 'all:unset;box-sizing:border-box;width:36px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:7px;color:#fff;font:600 18px/1 sans-serif;cursor:pointer;';
+      b.addEventListener('mouseenter', () => { b.style.background = 'rgba(255,255,255,0.18)'; });
+      b.addEventListener('mouseleave', () => { b.style.background = 'transparent'; });
+      b.addEventListener('click', azione);
+      return b;
+    };
+    barra.appendChild(bottone('__ivd_nav_indietro__', '←', 'Indietro', () => history.back()));
+    barra.appendChild(bottone('__ivd_nav_avanti__', '→', 'Avanti', () => history.forward()));
+    (document.body || document.documentElement).appendChild(barra);
+  }
+  const imposta = (id, attivo) => {
+    const b = document.getElementById(id);
+    b.style.opacity = attivo ? '1' : '0.35';
+    b.style.pointerEvents = attivo ? 'auto' : 'none';
+  };
+  imposta('__ivd_nav_indietro__', stato.indietro);
+  imposta('__ivd_nav_avanti__', stato.avanti);
+})()`;
+
 function merckFermaMonitor() {
   if (merckMonitor) { clearInterval(merckMonitor.timer); merckMonitor = null; }
 }
@@ -903,6 +937,18 @@ function avviaLoginMerck(url, { visibile = false } = {}) {
     let eraVisibile = mostra;
     win.on('show', () => { eraVisibile = true; });
     win.on('hide', () => { eraVisibile = false; });
+    // Frecce Indietro/Avanti: solo a finestra visibile (in background non servono). Si aggiornano
+    // a ogni navigazione e, di tanto in tanto, per rimetterle se la pagina le ha rimosse.
+    const aggiornaFrecce = () => {
+      if (win.isDestroyed() || !win.isVisible()) return;
+      const nav = win.webContents.navigationHistory;
+      const stato = JSON.stringify({ indietro: nav.canGoBack(), avanti: nav.canGoForward() });
+      win.webContents.executeJavaScript(MERCK_FRECCE_SCRIPT.replace('__STATO__', stato), true).catch(() => {});
+    };
+    ['dom-ready', 'did-finish-load', 'did-navigate', 'did-navigate-in-page'].forEach(ev => win.webContents.on(ev, aggiornaFrecce));
+    win.on('show', aggiornaFrecce);
+    const controlloFrecce = setInterval(aggiornaFrecce, 2000);
+    win.once('closed', () => clearInterval(controlloFrecce));
     merckUltimaDiagnostica = '';
     merckImpostaStato(credenziali ? 'accesso' : 'manuale',
       credenziali ? 'Accesso in corso in background…' : 'Nessuna credenziale salvata: accedi a mano nella finestra del portale');
