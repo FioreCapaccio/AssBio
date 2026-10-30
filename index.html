@@ -930,6 +930,7 @@
   <button data-section="fornitori" onclick="showSection('fornitori')">🏭 Fornitori</button>
   <button data-section="inventario" onclick="showSection('inventario')">📋 Inventario</button>
   <button data-section="bolle" onclick="showSection('bolle')">📄 Bolle</button>
+  <button data-section="piuscaricati" onclick="showSection('piuscaricati')">🔥 Più scaricati</button>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
     <button id="btnMerckNav" class="btn-sync-nav" onclick="merckMostraFinestra()" title="Mostra la finestra del portale Merck" style="display:none;">🌐 Merck</button>
     <button id="navSyncBtn" class="btn-sync-nav" onclick="gestisciSyncNav()" title="Sincronizzazione Cloud">☁️ Cloud</button>
@@ -1690,6 +1691,53 @@
           </thead>
           <tbody id="tbBolle">
             <tr><td colspan="6"><div class="empty-state"><div class="icon">📄</div><p>Nessuna bolla registrata</p></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== PIÙ SCARICATI (per fornitore) ===== -->
+  <div id="section-piuscaricati" class="section">
+    <div class="page-header">
+      <div>
+        <h2>Articoli più scaricati</h2>
+        <p>Per fornitore, dal più frequente: conta quante volte l'articolo compare in un intervento o in una bolla di scarico</p>
+      </div>
+      <button class="btn btn-primary" id="btnPiuScaricatiOrdine" onclick="creaOrdineDaPiuScaricati()">🛒 Crea ordine (0)</button>
+    </div>
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <select class="filter-select" id="filterPiuScaricatiForn" onchange="renderPiuScaricati()"></select>
+        <select class="filter-select" id="filterPiuScaricatiPeriodo" onchange="renderPiuScaricati()">
+          <option value="3">Ultimi 3 mesi</option>
+          <option value="6">Ultimi 6 mesi</option>
+          <option value="12" selected>Ultimi 12 mesi</option>
+          <option value="0">Tutto lo storico</option>
+        </select>
+      </div>
+      <div class="toolbar-right">
+        <span id="piuscaricati-count" style="font-size:0.83rem;color:var(--text-muted);align-self:center;"></span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:36px;"><input type="checkbox" id="chkPiuScaricatiTutti" onchange="piuScaricatiSelezionaTutti(this.checked)" title="Seleziona tutti"></th>
+              <th>#</th>
+              <th>Codice</th>
+              <th>Descrizione</th>
+              <th>Fornitore</th>
+              <th>Volte scaricato</th>
+              <th>Pezzi scaricati</th>
+              <th>Ultimo scarico</th>
+              <th>Giacenza</th>
+            </tr>
+          </thead>
+          <tbody id="tbPiuScaricati">
+            <tr><td colspan="9"><div class="empty-state"><div class="icon">🔥</div><p>Nessuno scarico nel periodo</p></div></td></tr>
           </tbody>
         </table>
       </div>
@@ -3773,7 +3821,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.41 • 28 ott 2026';
+const APP_VERSION = '2.10.42 • 30 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4881,6 +4929,7 @@ function renderAll(section) {
       renderFornitori();
       renderInventarioDettagliato();
       renderBolle();
+      renderPiuScaricati();
     } else {
       console.log("Esecuzione renderAll (" + section + ")...");
       const map = {
@@ -4891,7 +4940,8 @@ function renderAll(section) {
         ricambi: renderRicambi,
         fornitori: renderFornitori,
         inventario: renderInventarioDettagliato,
-        bolle: renderBolle
+        bolle: renderBolle,
+        piuscaricati: renderPiuScaricati
       };
       if (map[section]) map[section]();
     }
@@ -14963,6 +15013,125 @@ function invertiMovimentiBolla(id) {
       }
     }
   });
+}
+
+// ======================== PIÙ SCARICATI PER FORNITORE ========================
+// "Scaricato" = pezzo usato in un intervento (i.ricambi) o in una bolla di scarico. Si conta
+// quante volte l'articolo compare (una per intervento/bolla), non i pezzi. Il fornitore è
+// quello scritto sul ricambio (r.fornitore, testo libero).
+const _PIU_SCARICATI_NESSUN_FORN = '__nessuno__';
+const _piuScaricatiSel = new Set();
+let _piuScaricatiVisibili = [];
+
+function _fornKey(s) { return String(s || '').trim().toLowerCase(); }
+
+function _piuScaricatiCalcola(fornSel, mesi) {
+  let da = '';
+  if (mesi > 0) { const d = new Date(); d.setMonth(d.getMonth() - mesi); da = d.toISOString().slice(0, 10); }
+  const stat = new Map(); // ricambioId -> {volte, pezzi, ultimo}
+  const conta = (righe, data) => {
+    const viste = new Set();
+    (righe || []).forEach(a => {
+      const qta = parseFloat(a.qta) || 0;
+      if (!a.ricambioId || qta <= 0) return;
+      const st = stat.get(a.ricambioId) || { volte: 0, pezzi: 0, ultimo: '' };
+      if (!viste.has(a.ricambioId)) { st.volte++; viste.add(a.ricambioId); }
+      st.pezzi += qta;
+      if ((data || '') > st.ultimo) st.ultimo = data || '';
+      stat.set(a.ricambioId, st);
+    });
+  };
+  DB.interventi.forEach(i => { if (!da || (i.data || '') >= da) conta(i.ricambi, i.data); });
+  DB.bolle.forEach(b => { if (b.tipo === 'scarico' && (!da || (b.data || '') >= da)) conta(b.articoli, b.data); });
+
+  const filtro = fornSel === '' ? null : fornSel;
+  const righe = [];
+  stat.forEach((st, id) => {
+    const r = DB.ricambi.find(x => x.id === id);
+    if (!r) return;
+    const k = _fornKey(r.fornitore);
+    if (filtro !== null && (filtro === _PIU_SCARICATI_NESSUN_FORN ? k !== '' : k !== filtro)) return;
+    righe.push({ r, ...st });
+  });
+  righe.sort((a, b) => b.volte - a.volte || b.pezzi - a.pezzi || String(a.r.codice || '').localeCompare(String(b.r.codice || '')));
+  return righe;
+}
+
+function renderPiuScaricati() {
+  const selF = document.getElementById('filterPiuScaricatiForn');
+  const tb = document.getElementById('tbPiuScaricati');
+  if (!selF || !tb) return;
+
+  // Fornitori: anagrafica + nomi scritti sui ricambi che non sono in anagrafica
+  const nomi = new Map();
+  DB.fornitori.forEach(f => { const k = _fornKey(f.ragione); if (k) nomi.set(k, f.ragione); });
+  DB.ricambi.forEach(r => { const k = _fornKey(r.fornitore); if (k && !nomi.has(k)) nomi.set(k, r.fornitore.trim()); });
+  const corrente = selF.value;
+  selF.innerHTML = '<option value="">Tutti i fornitori</option>' +
+    [...nomi.entries()].sort((a, b) => a[1].localeCompare(b[1])).map(([k, n]) => `<option value="${escRaw(k)}">${escHtml(n)}</option>`).join('') +
+    `<option value="${_PIU_SCARICATI_NESSUN_FORN}">(senza fornitore)</option>`;
+  if ([...selF.options].some(o => o.value === corrente)) selF.value = corrente;
+
+  const mesi = parseInt(document.getElementById('filterPiuScaricatiPeriodo').value) || 0;
+  _piuScaricatiVisibili = _piuScaricatiCalcola(selF.value, mesi);
+  const visibili = new Set(_piuScaricatiVisibili.map(x => x.r.id));
+  [..._piuScaricatiSel].forEach(id => { if (!visibili.has(id)) _piuScaricatiSel.delete(id); });
+
+  document.getElementById('piuscaricati-count').textContent = _piuScaricatiVisibili.length + ' articoli';
+  if (_piuScaricatiVisibili.length === 0) {
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty-state"><div class="icon">🔥</div><p>Nessuno scarico nel periodo</p></div></td></tr>';
+  } else {
+    tb.innerHTML = _piuScaricatiVisibili.map((x, n) => {
+      const r = x.r;
+      return `<tr>
+        <td><input type="checkbox" ${_piuScaricatiSel.has(r.id) ? 'checked' : ''} onchange="piuScaricatiToggle(${r.id}, this.checked)"></td>
+        <td>${n + 1}</td>
+        <td><strong>${escHtml(r.codice || '—')}</strong></td>
+        <td>${escHtml(r.descrizione || '—')}</td>
+        <td>${escHtml(r.fornitore || '—')}</td>
+        <td style="text-align:center;"><strong>${x.volte}</strong></td>
+        <td style="text-align:center;">${Math.round(x.pezzi * 100) / 100}</td>
+        <td>${x.ultimo ? escHtml(x.ultimo.split('-').reverse().join('/')) : '—'}</td>
+        <td style="text-align:center;">${r.qta ?? 0} <small style="color:var(--text-muted)">${escHtml(r.um || 'pz')}</small></td>
+      </tr>`;
+    }).join('');
+  }
+  _piuScaricatiAggiornaUI();
+}
+
+function _piuScaricatiAggiornaUI() {
+  const btn = document.getElementById('btnPiuScaricatiOrdine');
+  if (btn) btn.textContent = `🛒 Crea ordine (${_piuScaricatiSel.size})`;
+  const chk = document.getElementById('chkPiuScaricatiTutti');
+  if (chk) chk.checked = _piuScaricatiVisibili.length > 0 && _piuScaricatiSel.size === _piuScaricatiVisibili.length;
+}
+
+function piuScaricatiToggle(id, on) {
+  if (on) _piuScaricatiSel.add(id); else _piuScaricatiSel.delete(id);
+  _piuScaricatiAggiornaUI();
+}
+
+function piuScaricatiSelezionaTutti(on) {
+  _piuScaricatiSel.clear();
+  if (on) _piuScaricatiVisibili.forEach(x => _piuScaricatiSel.add(x.r.id));
+  renderPiuScaricati();
+}
+
+// Apre il modulo "Nuovo Ordine" con gli articoli spuntati (quantità 1, da correggere nel modulo).
+// Un ordine è per un solo fornitore: se le righe scelte ne hanno di diversi si rifiuta.
+function creaOrdineDaPiuScaricati() {
+  const scelti = _piuScaricatiVisibili.filter(x => _piuScaricatiSel.has(x.r.id)).map(x => x.r);
+  if (scelti.length === 0) { mostraToast('Seleziona almeno un articolo.'); return; }
+  const chiavi = new Set(scelti.map(r => _fornKey(r.fornitore)));
+  if (chiavi.size > 1) { mostraToast('Hai selezionato articoli di fornitori diversi: filtra per un fornitore.', 'warning'); return; }
+  const forn = DB.fornitori.find(f => _fornKey(f.ragione) === [...chiavi][0]);
+
+  _carrelloOrdine = scelti.map(r => ({ id: r.id, codice: r.codice, desc: r.descrizione, qta: 1 }));
+  completataSelezioneOrdine();
+  if (forn) document.getElementById('o_fornitore_id').value = String(forn.id);
+  else mostraToast('Fornitore non presente in anagrafica: sceglilo nel modulo.', 'warning');
+  _piuScaricatiSel.clear();
+  renderPiuScaricati();
 }
 
 // ======================== GESTIONE ORDINI RICAMBI ========================
