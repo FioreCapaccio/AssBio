@@ -3821,7 +3821,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.42 • 30 ott 2026';
+const APP_VERSION = '2.10.43 • 30 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -15117,16 +15117,18 @@ function piuScaricatiSelezionaTutti(on) {
   renderPiuScaricati();
 }
 
-// Apre il modulo "Nuovo Ordine" con gli articoli spuntati (quantità 1, da correggere nel modulo).
+// Apre il modulo "Nuovo Ordine" con gli articoli spuntati (quantità = consumo del periodo, modificabile nel modulo).
 // Un ordine è per un solo fornitore: se le righe scelte ne hanno di diversi si rifiuta.
 function creaOrdineDaPiuScaricati() {
-  const scelti = _piuScaricatiVisibili.filter(x => _piuScaricatiSel.has(x.r.id)).map(x => x.r);
+  const righeScelte = _piuScaricatiVisibili.filter(x => _piuScaricatiSel.has(x.r.id));
+  const scelti = righeScelte.map(x => x.r);
   if (scelti.length === 0) { mostraToast('Seleziona almeno un articolo.'); return; }
   const chiavi = new Set(scelti.map(r => _fornKey(r.fornitore)));
   if (chiavi.size > 1) { mostraToast('Hai selezionato articoli di fornitori diversi: filtra per un fornitore.', 'warning'); return; }
   const forn = DB.fornitori.find(f => _fornKey(f.ragione) === [...chiavi][0]);
 
-  _carrelloOrdine = scelti.map(r => ({ id: r.id, codice: r.codice, desc: r.descrizione, qta: 1 }));
+  // Quantità proposta = pezzi scaricati nel periodo scelto (intera per eccesso, minimo 1)
+  _carrelloOrdine = righeScelte.map(x => ({ id: x.r.id, codice: x.r.codice, desc: x.r.descrizione, qta: Math.max(1, Math.ceil(x.pezzi)) }));
   completataSelezioneOrdine();
   if (forn) document.getElementById('o_fornitore_id').value = String(forn.id);
   else mostraToast('Fornitore non presente in anagrafica: sceglilo nel modulo.', 'warning');
