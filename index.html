@@ -930,7 +930,7 @@
   <button data-section="fornitori" onclick="showSection('fornitori')">🏭 Fornitori</button>
   <button data-section="inventario" onclick="showSection('inventario')">📋 Inventario</button>
   <button data-section="bolle" onclick="showSection('bolle')">📄 Bolle</button>
-  <button data-section="piuscaricati" onclick="showSection('piuscaricati')">🔥 Più scaricati</button>
+  <button data-section="piuscaricati" onclick="showSection('piuscaricati')">🔥 Articoli Usati</button>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
     <button id="btnMerckNav" class="btn-sync-nav" onclick="merckMostraFinestra()" title="Mostra la finestra del portale Merck" style="display:none;">🌐 Merck</button>
     <button id="navSyncBtn" class="btn-sync-nav" onclick="gestisciSyncNav()" title="Sincronizzazione Cloud">☁️ Cloud</button>
@@ -1697,11 +1697,11 @@
     </div>
   </div>
 
-  <!-- ===== PIÙ SCARICATI (per fornitore) ===== -->
+  <!-- ===== ARTICOLI USATI (per fornitore) ===== -->
   <div id="section-piuscaricati" class="section">
     <div class="page-header">
       <div>
-        <h2>Articoli più scaricati</h2>
+        <h2>Articoli Usati</h2>
         <p>Per fornitore, dal più frequente: conta quante volte l'articolo compare in un intervento o in una bolla di scarico</p>
       </div>
       <button class="btn btn-primary" id="btnPiuScaricatiOrdine" onclick="creaOrdineDaPiuScaricati()">🛒 Crea ordine (0)</button>
@@ -3821,7 +3821,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.43 • 30 ott 2026';
+const APP_VERSION = '2.10.44 • 30 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -15092,7 +15092,7 @@ function renderPiuScaricati() {
         <td style="text-align:center;"><strong>${x.volte}</strong></td>
         <td style="text-align:center;">${Math.round(x.pezzi * 100) / 100}</td>
         <td>${x.ultimo ? escHtml(x.ultimo.split('-').reverse().join('/')) : '—'}</td>
-        <td style="text-align:center;">${r.qta ?? 0} <small style="color:var(--text-muted)">${escHtml(r.um || 'pz')}</small></td>
+        <td style="text-align:center;">${(r.qta || 0) <= 0 ? `<span style="color:#dc2626;background:#fde047;font-weight:700;padding:1px 6px;border-radius:3px;">${r.qta || 0}</span>` : r.qta} <small style="color:var(--text-muted)">${escHtml(r.um || 'pz')}</small></td>
       </tr>`;
     }).join('');
   }
@@ -15117,7 +15117,7 @@ function piuScaricatiSelezionaTutti(on) {
   renderPiuScaricati();
 }
 
-// Apre il modulo "Nuovo Ordine" con gli articoli spuntati (quantità = consumo del periodo, modificabile nel modulo).
+// Apre il modulo "Nuovo Ordine" con gli articoli spuntati (quantità 1, modificabile nel modulo).
 // Un ordine è per un solo fornitore: se le righe scelte ne hanno di diversi si rifiuta.
 function creaOrdineDaPiuScaricati() {
   const righeScelte = _piuScaricatiVisibili.filter(x => _piuScaricatiSel.has(x.r.id));
@@ -15127,8 +15127,8 @@ function creaOrdineDaPiuScaricati() {
   if (chiavi.size > 1) { mostraToast('Hai selezionato articoli di fornitori diversi: filtra per un fornitore.', 'warning'); return; }
   const forn = DB.fornitori.find(f => _fornKey(f.ragione) === [...chiavi][0]);
 
-  // Quantità proposta = pezzi scaricati nel periodo scelto (intera per eccesso, minimo 1)
-  _carrelloOrdine = righeScelte.map(x => ({ id: x.r.id, codice: x.r.codice, desc: x.r.descrizione, qta: Math.max(1, Math.ceil(x.pezzi)) }));
+  // Quantità proposta 1 per ogni articolo, modificabile nel modulo
+  _carrelloOrdine = righeScelte.map(x => ({ id: x.r.id, codice: x.r.codice, desc: x.r.descrizione, qta: 1 }));
   completataSelezioneOrdine();
   if (forn) document.getElementById('o_fornitore_id').value = String(forn.id);
   else mostraToast('Fornitore non presente in anagrafica: sceglilo nel modulo.', 'warning');
