@@ -1359,9 +1359,9 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+// App a finestra singola: chiusa la finestra si esce anche su macOS (altrimenti resta
+// l'icona nel Dock con il pallino di "app aperta").
+app.on('window-all-closed', () => app.quit());
 
 // Prima di uscire (chiusura finestra su Windows/Linux, Cmd+Q su macOS) si attende il
 // completamento delle scritture dell'archivio già richieste dal renderer: prima il processo

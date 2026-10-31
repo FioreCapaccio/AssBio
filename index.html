@@ -928,9 +928,6 @@
   <button data-section="interventi" onclick="showSection('interventi')">🔧 Interventi</button>
   <button data-section="ricambi" onclick="showSection('ricambi')">📦 Ricambi</button>
   <button data-section="fornitori" onclick="showSection('fornitori')">🏭 Fornitori</button>
-  <button data-section="inventario" onclick="showSection('inventario')">📋 Inventario</button>
-  <button data-section="bolle" onclick="showSection('bolle')">📄 Bolle</button>
-  <button data-section="piuscaricati" onclick="showSection('piuscaricati')">🔥 Articoli Usati</button>
   <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
     <button id="btnMerckNav" class="btn-sync-nav" onclick="merckMostraFinestra()" title="Mostra la finestra del portale Merck" style="display:none;">🌐 Merck</button>
     <button id="navSyncBtn" class="btn-sync-nav" onclick="gestisciSyncNav()" title="Sincronizzazione Cloud">☁️ Cloud</button>
@@ -1305,7 +1302,10 @@
         <h2>Ricambi</h2>
         <p>Magazzino materiale di ricambio e consumabili</p>
       </div>
-      <div style="display:flex;gap:10px;">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn btn-ghost" style="background:#dbeafe;color:#1e40af;border-color:#93c5fd;" onclick="showSection('piuscaricati')">🔥 Articoli più usati</button>
+        <button class="btn btn-ghost" onclick="showSection('bolle')">📄 Bolle</button>
+        <button class="btn btn-ghost" onclick="showSection('inventario')">📋 Inventario</button>
         <button class="btn btn-ghost" onclick="openImportGuidatoModal('ricambi')">⬆️ Importa Excel</button>
         <button class="btn btn-ghost" onclick="openCarico()">📥 Registra carico</button>
         <button class="btn btn-primary" onclick="openRicambioModal()">+ Nuovo ricambio</button>
@@ -1701,7 +1701,7 @@
   <div id="section-piuscaricati" class="section">
     <div class="page-header">
       <div>
-        <h2>Articoli Usati</h2>
+        <h2>Articoli più usati</h2>
         <p>Per fornitore, dal più frequente: conta quante volte l'articolo compare in un intervento o in una bolla di scarico</p>
       </div>
       <button class="btn btn-primary" id="btnPiuScaricatiOrdine" onclick="creaOrdineDaPiuScaricati()">🛒 Crea ordine (0)</button>
@@ -3821,7 +3821,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.44 • 30 ott 2026';
+const APP_VERSION = '2.10.45 • 31 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -5857,7 +5857,8 @@ function showSection(id) {
   // l'indice nella lista dei soli showSection, ma nel DOM tra i bottoni ci sono anche
   // Cloud/Backup/Colleghi — "Impostazioni" risultava quindi MAI evidenziata (si illuminava
   // il bottone "☁️ Cloud").
-  const navBtn = document.querySelector('nav button[data-section="' + id + '"]');
+  const sottoRicambi = ['bolle', 'inventario', 'piuscaricati'].includes(id);
+  const navBtn = document.querySelector('nav button[data-section="' + (sottoRicambi ? 'ricambi' : id) + '"]');
   if (navBtn) navBtn.classList.add('active');
   if (id === 'impostazioni' && typeof merckAggiornaStatoCard === 'function') merckAggiornaStatoCard();
   renderAll(id);
