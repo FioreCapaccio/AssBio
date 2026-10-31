@@ -3789,6 +3789,33 @@
 </div>
 
 <script>
+// ======================== EXCEL: COLONNE ADATTATE AL TESTO ========================
+// Ogni export passa da XLSX.writeFile: prima di scrivere si imposta la larghezza di ogni colonna
+// sul testo più lungo che contiene (intestazione compresa), così nulla risulta tagliato.
+(function () {
+  if (!window.XLSX) return;
+  const scrivi = XLSX.writeFile.bind(XLSX);
+  XLSX.writeFile = function (wb, nomeFile, opts) {
+    for (const ws of Object.values(wb.Sheets || {})) {
+      if (!ws['!ref']) continue;
+      const r = XLSX.utils.decode_range(ws['!ref']);
+      const larg = [];
+      for (let c = r.s.c; c <= r.e.c; c++) {
+        let max = 0;
+        for (let row = r.s.r; row <= r.e.r; row++) {
+          const cella = ws[XLSX.utils.encode_cell({ r: row, c })];
+          if (!cella || cella.v == null) continue;
+          const testo = cella.w != null ? String(cella.w) : (cella.v instanceof Date ? 'gg/mm/aaaa hh:mm' : String(cella.v));
+          for (const riga of testo.split('\n')) max = Math.max(max, riga.length);
+        }
+        larg.push({ wch: Math.min(max + 2, 255) });  // 255 = massimo di Excel
+      }
+      ws['!cols'] = larg;
+    }
+    return scrivi(wb, nomeFile, opts);
+  };
+})();
+
 // ======================== DIALOGHI NATIVI E FOCUS ========================
 // In Electron, dopo un confirm()/alert() nativo la finestra può restare senza il focus di
 // tastiera: i campi di testo sembrano normali ma non accettano più la digitazione, e si
@@ -3826,7 +3853,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.46 • 31 ott 2026';
+const APP_VERSION = '2.10.47 • 31 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
