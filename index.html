@@ -401,6 +401,8 @@
     }
     input:hover, select:hover, textarea:hover { border-color: var(--border-strong); }
     textarea { resize: vertical; min-height: 80px; line-height: 1.5; }
+    /* Caselle e radio: dimensione naturale (la regola width:100% di sopra le allargava e spingeva le etichette a destra) */
+    input[type=checkbox], input[type=radio] { width: auto; flex: 0 0 auto; margin: 0; padding: 0; }
     .search-input { max-width: 180px; background: var(--surface); }
     .filter-select { max-width: 140px; min-width: 100px; cursor: pointer; font-size: 0.8rem; }
 
@@ -716,7 +718,10 @@
     .restore-preview { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; margin-top: 8px; display: none; }
     .restore-preview table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
     .restore-preview td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
-    .restore-preview td:first-child { font-weight: 600; color: var(--text-muted); }
+    .restore-preview td:first-child { font-weight: 600; color: var(--text-muted); width: 34%; white-space: nowrap; }
+    /* Valori a capo e allineati a sinistra: le regole globali di tabella (nowrap, ultima colonna a destra) li facevano uscire dalla finestra */
+    .restore-preview tbody td { white-space: normal; overflow-wrap: anywhere; vertical-align: top; }
+    .restore-preview td:last-child { text-align: left; min-width: 0; }
 
     .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .settings-card {
@@ -3821,7 +3826,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.45 • 31 ott 2026';
+const APP_VERSION = '2.10.46 • 31 ott 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
