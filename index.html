@@ -1309,6 +1309,7 @@
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
         <button class="btn btn-ghost" style="background:#dbeafe;color:#1e40af;border-color:#93c5fd;" onclick="showSection('piuscaricati')">🔥 Articoli più usati</button>
+        <button class="btn btn-ghost" style="background:#dcfce7;color:#166534;border-color:#86efac;" onclick="showSection('riordino')">🔄 Riordino automatico</button>
         <button class="btn btn-ghost" onclick="showSection('bolle')">📄 Bolle</button>
         <button class="btn btn-ghost" onclick="showSection('inventario')">📋 Inventario</button>
         <button class="btn btn-ghost" onclick="openImportGuidatoModal('ricambi')">⬆️ Importa Excel</button>
@@ -1356,13 +1357,14 @@
               <th>Categoria</th>
               <th>Strumento</th>
               <th>Qta disponibile</th>
+              <th title="Sotto questa quantità l'articolo compare nel Riordino automatico">Scorta min.</th>
               <th>Lotti</th>
               <th>Stato</th>
               <th></th>
             </tr>
           </thead>
           <tbody id="tbRicambi">
-            <tr><td colspan="8"><div class="empty-state"><div class="icon">📦</div><p>Nessun ricambio registrato</p></div></td></tr>
+            <tr><td colspan="9"><div class="empty-state"><div class="icon">📦</div><p>Nessun ricambio registrato</p></div></td></tr>
           </tbody>
         </table>
       </div>
@@ -1743,6 +1745,41 @@
           </thead>
           <tbody id="tbPiuScaricati">
             <tr><td colspan="9"><div class="empty-state"><div class="icon">🔥</div><p>Nessuno scarico nel periodo</p></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== RIORDINO AUTOMATICO (per fornitore) ===== -->
+  <div id="section-riordino" class="section">
+    <div class="page-header">
+      <div>
+        <h2>Riordino automatico</h2>
+        <p>Articoli con giacenza sotto la scorta minima, raggruppati per fornitore. La scorta minima si imposta nella colonna "Scorta min." della pagina Ricambi.</p>
+      </div>
+      <button class="btn btn-ghost" onclick="showSection('ricambi')">← Ricambi</button>
+    </div>
+    <div class="toolbar">
+      <div class="toolbar-right">
+        <span id="riordino-count" style="font-size:0.83rem;color:var(--text-muted);align-self:center;"></span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:36px;"></th>
+              <th>Codice</th>
+              <th>Descrizione</th>
+              <th>Giacenza</th>
+              <th>Scorta min.</th>
+              <th>Qta da ordinare</th>
+            </tr>
+          </thead>
+          <tbody id="tbRiordino">
+            <tr><td colspan="6"><div class="empty-state"><div class="icon">✅</div><p>Nessun articolo sotto scorta minima</p></div></td></tr>
           </tbody>
         </table>
       </div>
@@ -3853,7 +3890,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.47 • 31 ott 2026';
+const APP_VERSION = '2.10.48 • 6 nov 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4962,6 +4999,7 @@ function renderAll(section) {
       renderInventarioDettagliato();
       renderBolle();
       renderPiuScaricati();
+      renderRiordino();
     } else {
       console.log("Esecuzione renderAll (" + section + ")...");
       const map = {
@@ -4973,7 +5011,8 @@ function renderAll(section) {
         fornitori: renderFornitori,
         inventario: renderInventarioDettagliato,
         bolle: renderBolle,
-        piuscaricati: renderPiuScaricati
+        piuscaricati: renderPiuScaricati,
+        riordino: renderRiordino
       };
       if (map[section]) map[section]();
     }
@@ -5889,7 +5928,7 @@ function showSection(id) {
   // l'indice nella lista dei soli showSection, ma nel DOM tra i bottoni ci sono anche
   // Cloud/Backup/Colleghi — "Impostazioni" risultava quindi MAI evidenziata (si illuminava
   // il bottone "☁️ Cloud").
-  const sottoRicambi = ['bolle', 'inventario', 'piuscaricati'].includes(id);
+  const sottoRicambi = ['bolle', 'inventario', 'piuscaricati', 'riordino'].includes(id);
   const navBtn = document.querySelector('nav button[data-section="' + (sottoRicambi ? 'ricambi' : id) + '"]');
   if (navBtn) navBtn.classList.add('active');
   if (id === 'impostazioni' && typeof merckAggiornaStatoCard === 'function') merckAggiornaStatoCard();
@@ -15169,6 +15208,83 @@ function creaOrdineDaPiuScaricati() {
   renderPiuScaricati();
 }
 
+// ======================== RIORDINO AUTOMATICO (scorta minima) ========================
+// Giacenza come nella lista Ricambi: somma dei lotti attivi se ci sono, altrimenti r.qta.
+function _giacenzaRicambio(r) {
+  const attivi = (Array.isArray(r.lotti) ? r.lotti : []).filter(l => l && (parseFloat(l.qta) || 0) > 0);
+  return attivi.length ? attivi.reduce((s, l) => s + (parseFloat(l.qta) || 0), 0) : (parseFloat(r.qta) || 0);
+}
+
+function salvaScortaMin(id, val) {
+  const r = DB.ricambi.find(x => x.id === id);
+  if (!r) return;
+  r.scortaMin = Math.max(0, parseFloat(String(val).replace(',', '.')) || 0);
+  DB.save();
+  renderRicambi();
+}
+
+const _riordinoEsclusi = new Set(); // articoli deselezionati dall'utente
+
+function _riordinoGruppi() {
+  const gruppi = new Map(); // chiave fornitore -> {nome, righe}
+  DB.ricambi.forEach(r => {
+    const min = parseFloat(r.scortaMin) || 0;
+    const giac = _giacenzaRicambio(r);
+    if (min <= 0 || giac >= min) return;
+    const k = _fornKey(r.fornitore);
+    if (!gruppi.has(k)) gruppi.set(k, { nome: k ? r.fornitore.trim() : '(senza fornitore)', righe: [] });
+    gruppi.get(k).righe.push({ r, giac, min, daOrdinare: Math.ceil(min - giac) });
+  });
+  gruppi.forEach(g => g.righe.sort((a, b) => String(a.r.codice || '').localeCompare(String(b.r.codice || ''))));
+  // senza fornitore in fondo
+  return [...gruppi.entries()].sort((a, b) => (a[0] === '') - (b[0] === '') || a[1].nome.localeCompare(b[1].nome));
+}
+
+function renderRiordino() {
+  const tb = document.getElementById('tbRiordino');
+  if (!tb) return;
+  const gruppi = _riordinoGruppi();
+  const tot = gruppi.reduce((s, [, g]) => s + g.righe.length, 0);
+  document.getElementById('riordino-count').textContent = tot + ' articoli sotto scorta';
+  if (!tot) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="icon">✅</div><p>Nessun articolo sotto scorta minima</p></div></td></tr>';
+    return;
+  }
+  tb.innerHTML = gruppi.map(([k, g]) => {
+    const nSel = g.righe.filter(x => !_riordinoEsclusi.has(x.r.id)).length;
+    return `<tr style="background:var(--bg-hover,#f1f5f9);"><td colspan="5"><strong>${escHtml(g.nome)}</strong> <small style="color:var(--text-muted)">${g.righe.length} articoli</small></td>
+      <td style="text-align:right;"><button class="btn btn-primary btn-sm" onclick="creaOrdineRiordino('${escRaw(k)}')">🛒 Crea ordine (${nSel})</button></td></tr>` +
+      g.righe.map(x => `<tr>
+        <td><input type="checkbox" ${_riordinoEsclusi.has(x.r.id) ? '' : 'checked'} onchange="riordinoToggle(${x.r.id}, this.checked)"></td>
+        <td><strong>${escHtml(x.r.codice || '—')}</strong></td>
+        <td>${escHtml(x.r.descrizione || '—')}</td>
+        <td style="text-align:center;"><span style="color:#dc2626;font-weight:700;">${Math.round(x.giac * 100) / 100}</span> <small style="color:var(--text-muted)">${escHtml(x.r.um || 'pz')}</small></td>
+        <td style="text-align:center;">${x.min}</td>
+        <td><input type="number" min="1" step="1" value="${Math.max(1, x.daOrdinare)}" id="riordinoQta_${x.r.id}" style="width:70px;text-align:center;"></td>
+      </tr>`).join('');
+  }).join('');
+}
+
+function riordinoToggle(id, on) {
+  if (on) _riordinoEsclusi.delete(id); else _riordinoEsclusi.add(id);
+  renderRiordino();
+}
+
+// Apre il modulo "Nuovo Ordine" con gli articoli spuntati di UN fornitore, nelle quantità indicate.
+function creaOrdineRiordino(chiave) {
+  const g = _riordinoGruppi().find(([k]) => k === chiave);
+  const righe = g ? g[1].righe.filter(x => !_riordinoEsclusi.has(x.r.id)) : [];
+  if (!righe.length) { mostraToast('Seleziona almeno un articolo.'); return; }
+  _carrelloOrdine = righe.map(x => {
+    const qta = parseFloat(document.getElementById('riordinoQta_' + x.r.id)?.value) || x.daOrdinare;
+    return { id: x.r.id, codice: x.r.codice, desc: x.r.descrizione, qta: Math.max(1, qta) };
+  });
+  completataSelezioneOrdine();
+  const forn = chiave ? DB.fornitori.find(f => _fornKey(f.ragione) === chiave) : null;
+  if (forn) document.getElementById('o_fornitore_id').value = String(forn.id);
+  else mostraToast('Fornitore non presente in anagrafica: sceglilo nel modulo.', 'warning');
+}
+
 // ======================== GESTIONE ORDINI RICAMBI ========================
 let _currentOrdineId = null;
 let _carrelloOrdine = []; // Temporaneo per articoli selezionati da lista ricambi
@@ -17024,7 +17140,7 @@ function renderRicambi() {
   if (!tb) return;
 
   if (list.length === 0) {
-    tb.innerHTML = `<tr><td colspan="8"><div class="empty-state"><div class="icon">📦</div><p>Nessun ricambio trovato</p></div></td></tr>`;
+    tb.innerHTML = `<tr><td colspan="9"><div class="empty-state"><div class="icon">📦</div><p>Nessun ricambio trovato</p></div></td></tr>`;
     return;
   }
   
@@ -17074,6 +17190,7 @@ function renderRicambi() {
         <td><span class="badge badge-gray">${r.categoria?escHtml(r.categoria):'—'}</span></td>
         <td>${r.strumento?escHtml(r.strumento):'—'}</td>
         <td style="text-align:center;"><strong style="font-size:1rem;">${qtaVal}</strong> <small style="color:var(--text-muted)">${escHtml(r.um||'pz')}</small></td>
+        <td style="text-align:center;"><input type="number" min="0" step="1" value="${r.scortaMin > 0 ? r.scortaMin : ''}" placeholder="—" onchange="salvaScortaMin(${r.id}, this.value)" title="Quantità minima da tenere a magazzino" style="width:64px;text-align:center;${r.scortaMin > 0 && qtaVal < r.scortaMin ? 'border-color:#dc2626;background:#fee2e2;' : ''}"></td>
         <td style="text-align:center;">${lottiBtnLabel}</td>
         <td><span class="badge ${badge}">${stato}</span></td>
         <td>
