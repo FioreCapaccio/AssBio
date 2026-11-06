@@ -2766,6 +2766,10 @@
           <label for="r_lead">Lead time (giorni)</label>
           <input type="number" id="r_lead" min="0" placeholder="giorni">
         </div>
+        <div class="form-group">
+          <label for="r_scorta_min">Scorta minima</label>
+          <input type="number" id="r_scorta_min" min="0" step="1" placeholder="es. 3">
+        </div>
         <div class="form-group full">
           <label for="r_note">Note</label>
           <textarea id="r_note" placeholder="Note aggiuntive..."></textarea>
@@ -3890,7 +3894,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.48 • 6 nov 2026';
+const APP_VERSION = '2.10.49 • 6 nov 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -5063,7 +5067,7 @@ function aggiungiRigaInventarioFisico() {
   if (!r) {
     if (confirm(`Codice "${codice}" non trovato in archivio.\n\nAggiungerlo come nuovo articolo?`)) {
       editRicambioId = null;
-      resetForm(['r_codice','r_codice_forn','r_descrizione','r_categoria','r_strumento','r_qta','r_um','r_fornitore','r_prezzo','r_lead','r_note']);
+      resetForm(['r_codice','r_codice_forn','r_descrizione','r_categoria','r_strumento','r_qta','r_um','r_fornitore','r_prezzo','r_lead','r_scorta_min','r_note']);
       document.getElementById('r_codice').value = codice;
       document.getElementById('r_qta').value = 0;
       if (document.getElementById('r_qta_note')) document.getElementById('r_qta_note').style.display = 'none';
@@ -12258,10 +12262,11 @@ function openRicambioModal(id = null) {
     document.getElementById('r_fornitore').value = r.fornitore||'';
     document.getElementById('r_prezzo').value = r.prezzo||'';
     document.getElementById('r_lead').value = r.lead||'';
+    document.getElementById('r_scorta_min').value = r.scortaMin||'';
     document.getElementById('r_note').value = r.note||'';
     if (document.getElementById('r_qta_note')) document.getElementById('r_qta_note').style.display = 'block';
   } else {
-    resetForm(['r_codice','r_codice_forn','r_descrizione','r_categoria','r_strumento','r_qta','r_um','r_fornitore','r_prezzo','r_lead','r_note']);
+    resetForm(['r_codice','r_codice_forn','r_descrizione','r_categoria','r_strumento','r_qta','r_um','r_fornitore','r_prezzo','r_lead','r_scorta_min','r_note']);
     document.getElementById('r_qta').value = 0;
     if (document.getElementById('r_qta_note')) document.getElementById('r_qta_note').style.display = 'none';
   }
@@ -12285,6 +12290,7 @@ function _salvaRicambioImpl() {
     fornitore: document.getElementById('r_fornitore').value.trim(),
     prezzo: parseFloat(document.getElementById('r_prezzo').value)||0,
     lead: parseInt(document.getElementById('r_lead').value)||0,
+    scortaMin: Math.max(0, parseFloat(document.getElementById('r_scorta_min').value)||0),
     note: document.getElementById('r_note').value.trim(),
   };
   if (editRicambioId) {
