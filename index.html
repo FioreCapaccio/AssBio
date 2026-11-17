@@ -2026,6 +2026,7 @@
         </div>
         <div class="form-group full" style="margin-top:4px;">
           <label>Strumenti installati (modello + n° serie + reparto + fornitore)</label>
+          <datalist id="dl_reparti"><option value="Laboratorio Analisi"><option value="Anatomia Patologica"><option value="Centro Trasfusionale"></datalist>
           <div id="strumentiInstallatiRows" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;"></div>
           <button type="button" class="btn btn-ghost btn-sm" style="margin-top:8px;align-self:flex-start;" onclick="addStrumentoRow()">+ Aggiungi strumento</button>
         </div>
@@ -3894,7 +3895,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.51 • 17 nov 2026';
+const APP_VERSION = '2.10.52 • 17 nov 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -8457,7 +8458,7 @@ function addStrumentoRow(data = {}) {
   div.innerHTML = `
     <input type="text" placeholder="Modello (es. Cobas 6000)" value="${escRaw(data.modello)}" style="font-size:0.88rem;">
     <input type="text" placeholder="N° serie / Matricola" value="${escRaw(data.seriale)}" style="font-size:0.88rem;font-family:monospace;">
-    <input type="text" placeholder="Reparto (es. Laboratorio)" value="${escRaw(data.reparto)}" style="font-size:0.88rem;">
+    <input type="text" list="dl_reparti" placeholder="Reparto" value="${escRaw(data.reparto)}" style="font-size:0.88rem;">
     <select class="strumento-fornitore" style="font-size:0.88rem;">
       <option value="">-- Nessun fornitore --</option>
       ${_fornitoriConTariffa().map(f => `<option value="${f.id}" ${String(fornitoreId)===String(f.id)?'selected':''}>${escHtml(f.ragione)}</option>`).join('')}
