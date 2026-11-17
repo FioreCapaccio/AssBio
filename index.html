@@ -2026,7 +2026,6 @@
         </div>
         <div class="form-group full" style="margin-top:4px;">
           <label>Strumenti installati (modello + n° serie + reparto + fornitore)</label>
-          <datalist id="dl_reparti"><option value="Laboratorio Analisi"><option value="Anatomia Patologica"><option value="Centro Trasfusionale"></datalist>
           <div id="strumentiInstallatiRows" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;"></div>
           <button type="button" class="btn btn-ghost btn-sm" style="margin-top:8px;align-self:flex-start;" onclick="addStrumentoRow()">+ Aggiungi strumento</button>
         </div>
@@ -3895,7 +3894,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.52 • 17 nov 2026';
+const APP_VERSION = '2.10.53 • 17 nov 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -8449,6 +8448,38 @@ function buildStrumentiRows(list) {
   (list||[]).forEach(s => addStrumentoRow(s));
 }
 
+// Reparti: tre fissi + quelli aggiunti dall'utente, che si ricavano dagli strumenti già salvati
+// (nessun elenco da mantenere a parte: un reparto non più usato da nessuno sparisce da solo).
+const _REPARTI_BASE = ['Laboratorio Analisi', 'Anatomia Patologica', 'Centro Trasfusionale'];
+
+function _opzioniReparto(selezionato = '') {
+  const sel = String(selezionato || '').trim();
+  const altri = new Set();
+  [...DB.clienti.flatMap(c => c.strumentiInstallati || []).map(s => s.reparto), sel].forEach(r => {
+    r = String(r || '').trim();
+    if (r && !_REPARTI_BASE.includes(r)) altri.add(r);
+  });
+  const voci = [..._REPARTI_BASE, ...[...altri].sort((a, b) => a.localeCompare(b))];
+  return '<option value="">— Reparto —</option>' +
+    voci.map(r => `<option value="${escRaw(r)}"${r === sel ? ' selected' : ''}>${escHtml(r)}</option>`).join('') +
+    '<option value="__nuovo__">➕ Aggiungi reparto…</option>';
+}
+
+async function repartoSelezionato(sel) {
+  if (sel.value !== '__nuovo__') { sel.dataset.prec = sel.value; return; }
+  const nome = String(await _promptModal('Nome del nuovo reparto:') || '').trim();
+  if (!nome) { sel.value = sel.dataset.prec || ''; return; }
+  // l'opzione compare in tutte le righe aperte; se esiste già (anche con maiuscole diverse) si usa quella
+  document.querySelectorAll('#strumentiInstallatiRows .strumento-reparto').forEach(s => {
+    if (![...s.options].some(o => o.value.toLowerCase() === nome.toLowerCase())) {
+      s.insertBefore(new Option(nome, nome), s.querySelector('option[value="__nuovo__"]'));
+    }
+  });
+  const voce = [...sel.options].find(o => o.value.toLowerCase() === nome.toLowerCase());
+  sel.value = voce.value;
+  sel.dataset.prec = sel.value;
+}
+
 function addStrumentoRow(data = {}) {
   const cont = document.getElementById('strumentiInstallatiRows');
   const div = document.createElement('div');
@@ -8458,7 +8489,7 @@ function addStrumentoRow(data = {}) {
   div.innerHTML = `
     <input type="text" placeholder="Modello (es. Cobas 6000)" value="${escRaw(data.modello)}" style="font-size:0.88rem;">
     <input type="text" placeholder="N° serie / Matricola" value="${escRaw(data.seriale)}" style="font-size:0.88rem;font-family:monospace;">
-    <input type="text" list="dl_reparti" placeholder="Reparto" value="${escRaw(data.reparto)}" style="font-size:0.88rem;">
+    <select class="strumento-reparto" data-prec="${escRaw(data.reparto)}" onchange="repartoSelezionato(this)" style="font-size:0.88rem;">${_opzioniReparto(data.reparto)}</select>
     <select class="strumento-fornitore" style="font-size:0.88rem;">
       <option value="">-- Nessun fornitore --</option>
       ${_fornitoriConTariffa().map(f => `<option value="${f.id}" ${String(fornitoreId)===String(f.id)?'selected':''}>${escHtml(f.ragione)}</option>`).join('')}
@@ -8479,7 +8510,7 @@ function getStrumentiFromRows() {
     return {
       modello: inputs[0].value.trim(),
       seriale: inputs[1].value.trim(),
-      reparto: inputs[2].value.trim(),
+      reparto: div.querySelector('.strumento-reparto').value,
       fornitoreId: selFornitore && selFornitore.value ? parseInt(selFornitore.value) : null,
       mercato: selMercato ? selMercato.value : 'Standard',
     };
