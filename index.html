@@ -3894,7 +3894,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.49 • 6 nov 2026';
+const APP_VERSION = '2.10.50 • 17 nov 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -10193,6 +10193,7 @@ function _apriProssimoInterventoDaCoda() {
   // progressivo "NN-AA". Prima qui i campi venivano valorizzati a mano, senza fornitore: da
   // appuntamento il numero restava il WO-xxxx standard anche per gli strumenti INTELSINT.
   const cliApp = DB.clienti.find(c => c.id === a.clienteId);
+  if (cliApp && merckRegistraStrumentiCliente(cliApp, [prossimo])) DB.save();
   const strumentiCliente = cliApp ? (cliApp.strumentiInstallati || migraStrumenti(cliApp.strumenti || '')) : [];
   const modelloL = String(prossimo.modello || '').trim().toLowerCase();
   const serialeL = String(prossimo.seriale || '').trim().toLowerCase();
@@ -10997,7 +10998,7 @@ async function confermaCreaAppuntamentiMerck() {
   const saltate = selezionate.length - daCreare.length;
   if (!daCreare.length) { mostraToast('Tutte le chiamate selezionate risultano già presenti.', 'info'); return; }
 
-  let creati = 0;
+  let creati = 0, strumentiAggiunti = 0;
   const senzaCliente = [];
   daCreare.forEach(c => {
     const app = {
@@ -11029,13 +11030,15 @@ async function confermaCreaAppuntamentiMerck() {
       senzaCliente.push(app);
     }
     DB.appuntamenti.push(app);
+    const cliAbbinato = c.clienteId && DB.clienti.find(x => x.id === c.clienteId);
+    if (cliAbbinato) strumentiAggiunti += merckRegistraStrumentiCliente(cliAbbinato, app.strumenti);
     creati++;
   });
   DB.save();
   DB.auditLog('create', 'appuntamento', null, `Creati ${creati} appuntamenti da portale Merck${saltate ? ` (${saltate} saltate perché già presenti)` : ''}`);
   closeModal('modalMerckChiamate');
   renderAll();
-  mostraToast(`✅ Creati ${creati} appuntament${creati === 1 ? 'o' : 'i'} da Merck${saltate ? ` — ${saltate} già presenti, saltate` : ''}.\nGli appuntamenti Merck sono evidenziati in verde acqua sia in lista sia nel calendario.`, 'success');
+  mostraToast(`✅ Creati ${creati} appuntament${creati === 1 ? 'o' : 'i'} da Merck${saltate ? ` — ${saltate} già presenti, saltate` : ''}.\nGli appuntamenti Merck sono evidenziati in verde acqua sia in lista sia nel calendario.${strumentiAggiunti ? `\n${strumentiAggiunti} nuov${strumentiAggiunti === 1 ? 'o strumento aggiunto' : 'i strumenti aggiunti'} alla scheda del cliente.` : ''}`, 'success');
 
   if (senzaCliente.length) {
     const nomi = [...new Set(senzaCliente.map(a => a.clienteDatiPortale.ragione))];
@@ -11046,6 +11049,28 @@ async function confermaCreaAppuntamentiMerck() {
   }
 }
 
+// Lo strumento della chiamata (modello + matricola) viene registrato anche sulla scheda
+// cliente: serve a riconoscere il cliente dalla matricola nelle importazioni successive e a
+// precompilare lo strumento quando si crea l'intervento. Vale anche per un cliente già in
+// archivio che ha un strumento in più: prima veniva aggiunto solo ai clienti creati dal portale.
+// Doppione = stessa matricola (se c'è), altrimenti stesso modello.
+function merckRegistraStrumentiCliente(cl, strumenti) {
+  cl.strumentiInstallati = cl.strumentiInstallati || migraStrumenti(cl.strumenti || '');
+  let aggiunti = 0;
+  (strumenti || []).forEach(s => {
+    const modello = String(s.modello || '').trim(), seriale = String(s.seriale || '').trim();
+    if (!modello && !seriale) return;
+    const esiste = cl.strumentiInstallati.some(x => seriale
+      ? String(x.seriale || '').trim().toLowerCase() === seriale.toLowerCase()
+      : String(x.modello || '').trim().toLowerCase() === modello.toLowerCase());
+    if (esiste) return;
+    cl.strumentiInstallati.push({ modello, seriale, fornitoreId: null, mercato: 'Standard' });
+    aggiunti++;
+  });
+  if (aggiunti) cl.strumenti = cl.strumentiInstallati.map(s => s.modello).join('\n');
+  return aggiunti;
+}
+
 // Crea in archivio le schede cliente mancanti partendo dai dati letti dal portale Merck
 // (clienteDatiPortale, salvato sull'appuntamento quando l'abbinamento automatico per
 // matricola/nome non trova nulla) e ricollega subito gli appuntamenti coinvolti. Più
@@ -11054,18 +11079,6 @@ async function confermaCreaAppuntamentiMerck() {
 function merckCreaClientiDaPortale(appuntamentiSenzaCliente) {
   const perRagione = new Map();
   let creati = 0, collegati = 0;
-  // Lo strumento della chiamata (modello + matricola) viene registrato anche sulla scheda
-  // cliente: serve a riconoscere il cliente dalla matricola nelle importazioni successive e a
-  // precompilare lo strumento quando si crea l'intervento.
-  const registraStrumenti = (cl, app) => {
-    cl.strumentiInstallati = cl.strumentiInstallati || [];
-    (app.strumenti || []).forEach(s => {
-      if (!s.modello && !s.seriale) return;
-      const esiste = cl.strumentiInstallati.some(x => (x.modello || '') === (s.modello || '') && (x.seriale || '') === (s.seriale || ''));
-      if (!esiste) cl.strumentiInstallati.push({ modello: s.modello || '', seriale: s.seriale || '', fornitoreId: null, mercato: 'Standard' });
-    });
-    cl.strumenti = cl.strumentiInstallati.map(s => s.modello).join('\n');
-  };
   appuntamentiSenzaCliente.forEach(a => {
     const d = a.clienteDatiPortale;
     if (!d || !d.ragione) return;
@@ -11091,7 +11104,7 @@ function merckCreaClientiDaPortale(appuntamentiSenzaCliente) {
     const live = DB.appuntamenti.find(x => x.id === a.id);
     if (live) {
       live.clienteId = cl.id;
-      registraStrumenti(cl, live);
+      merckRegistraStrumentiCliente(cl, live.strumenti);
       collegati++;
     }
   });
