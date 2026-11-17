@@ -2025,7 +2025,7 @@
           <input type="text" id="c_codice" placeholder="es. CLI-001">
         </div>
         <div class="form-group full" style="margin-top:4px;">
-          <label>Strumenti installati (modello + n° serie + fornitore)</label>
+          <label>Strumenti installati (modello + n° serie + reparto + fornitore)</label>
           <div id="strumentiInstallatiRows" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;"></div>
           <button type="button" class="btn btn-ghost btn-sm" style="margin-top:8px;align-self:flex-start;" onclick="addStrumentoRow()">+ Aggiungi strumento</button>
         </div>
@@ -3894,7 +3894,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.50 • 17 nov 2026';
+const APP_VERSION = '2.10.51 • 17 nov 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
@@ -4927,7 +4927,8 @@ function handleUniversalSearch(q) {
       String(c.codice||'').toLowerCase().includes(query);
     const matchStrumenti = (c.strumentiInstallati || []).some(s =>
       String(s.matricola||'').toLowerCase().includes(query) ||
-      String(s.modello||'').toLowerCase().includes(query)
+      String(s.modello||'').toLowerCase().includes(query) ||
+      String(s.reparto||'').toLowerCase().includes(query)
     );
     return matchBase || matchStrumenti;
   });
@@ -8283,6 +8284,7 @@ function openStrumentiCliente(id) {
         <thead><tr>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);font-size:0.8rem;color:var(--text-muted);">Modello</th>
           <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);font-size:0.8rem;color:var(--text-muted);">N° serie / Matricola</th>
+          <th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);font-size:0.8rem;color:var(--text-muted);">Reparto</th>
           <th style="padding:6px 8px;border-bottom:1px solid var(--border);"></th>
         </tr></thead>
         <tbody>${strumenti.map(s => {
@@ -8295,6 +8297,7 @@ function openStrumentiCliente(id) {
           return `<tr>
             <td style="padding:7px 8px;border-bottom:1px solid var(--border);font-size:0.88rem;">${escHtml(s.modello)}</td>
             <td style="padding:7px 8px;border-bottom:1px solid var(--border);font-family:monospace;font-size:0.83rem;">${serialeHtml}</td>
+            <td style="padding:7px 8px;border-bottom:1px solid var(--border);font-size:0.88rem;">${s.reparto ? escHtml(s.reparto) : '—'}</td>
             <td style="padding:7px 8px;border-bottom:1px solid var(--border);text-align:right;">
               <button class="btn btn-ghost btn-sm" style="font-size:0.75rem;padding:3px 8px;"
                 onclick="closeModal('modalStrumentiCliente');_nuovoInterventoStrumento(${c.id},'${mod}','${ser}')">
@@ -8449,11 +8452,12 @@ function addStrumentoRow(data = {}) {
   const cont = document.getElementById('strumentiInstallatiRows');
   const div = document.createElement('div');
   div.className = 'strumento-row';
-  div.style.cssText = 'display:grid;grid-template-columns:1.3fr 1fr 1fr 100px auto;gap:6px;align-items:center;';
+  div.style.cssText = 'display:grid;grid-template-columns:1.3fr 1fr 1fr 1fr 100px auto;gap:6px;align-items:center;';
   const fornitoreId = data.fornitoreId || '';
   div.innerHTML = `
     <input type="text" placeholder="Modello (es. Cobas 6000)" value="${escRaw(data.modello)}" style="font-size:0.88rem;">
     <input type="text" placeholder="N° serie / Matricola" value="${escRaw(data.seriale)}" style="font-size:0.88rem;font-family:monospace;">
+    <input type="text" placeholder="Reparto (es. Laboratorio)" value="${escRaw(data.reparto)}" style="font-size:0.88rem;">
     <select class="strumento-fornitore" style="font-size:0.88rem;">
       <option value="">-- Nessun fornitore --</option>
       ${_fornitoriConTariffa().map(f => `<option value="${f.id}" ${String(fornitoreId)===String(f.id)?'selected':''}>${escHtml(f.ragione)}</option>`).join('')}
@@ -8474,6 +8478,7 @@ function getStrumentiFromRows() {
     return {
       modello: inputs[0].value.trim(),
       seriale: inputs[1].value.trim(),
+      reparto: inputs[2].value.trim(),
       fornitoreId: selFornitore && selFornitore.value ? parseInt(selFornitore.value) : null,
       mercato: selMercato ? selMercato.value : 'Standard',
     };
@@ -16858,9 +16863,9 @@ function exportExcel(tipo) {
         'Contratto': c.contratto, 'Scadenza contratto': c.scadenza, 'Note': c.note
       };
       if (strumenti.length === 0) {
-        rows.push({ ...base, 'Modello strumento': '', 'Matricola/S.N.': '', 'Mercato': '' });
+        rows.push({ ...base, 'Modello strumento': '', 'Matricola/S.N.': '', 'Reparto': '', 'Mercato': '' });
       } else {
-        strumenti.forEach(s => rows.push({ ...base, 'Modello strumento': s.modello||'', 'Matricola/S.N.': s.seriale||'', 'Mercato': s.mercato||'Standard' }));
+        strumenti.forEach(s => rows.push({ ...base, 'Modello strumento': s.modello||'', 'Matricola/S.N.': s.seriale||'', 'Reparto': s.reparto||'', 'Mercato': s.mercato||'Standard' }));
       }
     });
     ws = XLSX.utils.json_to_sheet(rows); nome = 'Clienti';
