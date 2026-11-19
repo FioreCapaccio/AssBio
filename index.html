@@ -584,6 +584,7 @@
     .parts-item-row2 .part-lotto-wrap { flex: 1; min-width: 180px; }
     .parts-item-row2 input[type=number] { width: 80px; text-align: center; flex-shrink: 0; }
     .part-lotto-badge { font-size: 0.7rem; color: var(--text-muted); white-space: nowrap; }
+    .part-dropdown { font-size: 0.875rem; } /* stessa dimensione dei campi: le righe senza font-size ereditavano il corpo pagina, più grande */
     .part-option:hover { background: var(--surface2); }
     .part-dropdown::-webkit-scrollbar { width: 6px; }
     .part-dropdown::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
@@ -3894,7 +3895,7 @@
 
 // ======================== APP VERSION ========================
 // Aggiornare questo numero ad ogni modifica al codice, partendo da 2.0
-const APP_VERSION = '2.10.54 • 17 nov 2026';
+const APP_VERSION = '2.10.55 • 19 nov 2026';
 
 // ======================== GLOBAL ERROR HANDLING ========================
 window.addEventListener('error', function(e) {
